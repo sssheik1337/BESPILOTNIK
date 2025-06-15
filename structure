@@ -1,0 +1,20 @@
+project/
+│
+├── handlers/
+│   ├── user_handlers.py       # Обработчики для пользователей
+│   ├── admin_handlers.py      # Обработчики для админов
+│   ├── common_handlers.py     # Общие обработчики
+│
+├── keyboards/
+│   ├── inline.py              # Inline-клавиатуры
+│
+├── database/
+│   ├── models.py              # Модели и операции с PostgreSQL
+│
+├── utils/
+│   ├── validators.py          # Валидация серийных номеров и медиа
+│   ├── excel_utils.py         # Работа с Excel
+│
+├── config.py                  # Конфигурация (токен, ID группы, админы)
+├── main.py                    # Главный файл бота
+└── requirements.txt           # Зависимости
