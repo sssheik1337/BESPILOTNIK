@@ -4,7 +4,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from keyboards.inline import get_user_menu, get_my_appeals_user_menu, get_admin_menu, get_notification_menu, get_channel_take_button
 from utils.validators import validate_serial, validate_media
-from database.models import Database
+from database.db import add_appeal, check_duplicate_appeal, get_user_appeals, get_appeal, get_notification_channels
 from datetime import datetime
 import json
 from config import MAIN_ADMIN_IDS
@@ -30,7 +30,7 @@ async def create_appeal(callback: CallbackQuery, state: FSMContext):
     logger.debug(f"Пользователь @{callback.from_user.username} (ID: {callback.from_user.id}) начал создание обращения")
 
 @router.message(AppealForm.serial)
-async def process_serial(message: Message, state: FSMContext):
+async def process_serial(message: Message, state: FSMContext, **data):
     serial = message.text
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -39,11 +39,9 @@ async def process_serial(message: Message, state: FSMContext):
         await message.answer("Неверный формат серийного номера (A-Za-z0-9, 8–20 символов). Попробуйте снова:", reply_markup=keyboard)
         logger.warning(f"Неверный серийный номер {serial} от @{message.from_user.username} (ID: {message.from_user.id})")
         return
-    db = Database()
-    await db.connect()
-    async with db.conn.cursor() as cursor:
-        await cursor.execute("SELECT * FROM serials WHERE serial = ?", (serial,))
-        serial_exists = await cursor.fetchone()
+    db_pool = data["db_pool"]
+    async with db_pool.acquire() as conn:
+        serial_exists = await conn.fetchrow("SELECT * FROM serials WHERE serial = $1", serial)
     if not serial_exists:
         await message.answer("Серийный номер не найден в базе.", reply_markup=keyboard)
         logger.warning(f"Серийный номер {serial} не найден, попытка от @{message.from_user.username} (ID: {message.from_user.id})")
@@ -73,37 +71,36 @@ async def process_description(message: Message, state: FSMContext):
     logger.debug(f"Описание принято от @{message.from_user.username} (ID: {message.from_user.id}): {description}")
 
 @router.message(AppealForm.media)
-async def process_media(message: Message, state: FSMContext):
-    data = await state.get_data()
-    media_files = data.get("media_files", [])
+async def process_media(message: Message, state: FSMContext, **data):
+    db_pool = data["db_pool"]
+    data_state = await state.get_data()
+    media_files = data_state.get("media_files", [])
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
     ])
     is_valid, media_type = validate_media(message)
     if message.text and message.text.lower() == "готово":
-        db = Database()
-        await db.connect()
-        duplicate = await db.check_duplicate_appeal(data["serial"], data["description"], data["user_id"])
+        duplicate = await check_duplicate_appeal(db_pool, data_state["serial"], data_state["description"], data_state["user_id"])
         if duplicate:
             await message.answer("Ошибка: У вас уже есть активная заявка с таким серийным номером и описанием.",
                                  reply_markup=keyboard)
-            logger.warning(f"Дублирующая заявка для серийника {data['serial']} от @{message.from_user.username} (ID: {data['user_id']})")
+            logger.warning(f"Дублирующая заявка для серийника {data_state['serial']} от @{message.from_user.username} (ID: {data_state['user_id']})")
             await state.clear()
             return
-        appeal_id, appeal_count = await db.add_appeal(data["serial"], message.from_user.username, data["description"],
-                                                      media_files, data["user_id"])
+        appeal_id, appeal_count = await add_appeal(db_pool, data_state["serial"], message.from_user.username, data_state["description"],
+                                                   media_files, data_state["user_id"])
         await message.answer("Обращение создано!", reply_markup=keyboard)
-        logger.info(f"Обращение №{appeal_id} создано пользователем @{message.from_user.username} (ID: {data['user_id']})")
-        channels = await db.get_notification_channels()
+        logger.info(f"Обращение №{appeal_id} создано пользователем @{message.from_user.username} (ID: {data_state['user_id']})")
+        channels = await get_notification_channels()
         logger.debug(f"Найдено каналов для уведомлений: {len(channels)}")
         created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         appeal_type = "Первая" if appeal_count == 1 else "Повторная"
         text = (f"📲 Новая заявка №{appeal_id}:\n\n"
                 f"Пользователь: @{message.from_user.username}\n"
                 f"Дата создания: {created_at}\n"
-                f"Серийный номер: {data['serial']}\n"
+                f"Серийный номер: {data_state['serial']}\n"
                 f"Тип заявки: {appeal_type}\n"
-                f"Описание: {data['description']}")
+                f"Описание: {data_state['description']}")
         for channel in channels:
             logger.debug(f"Отправка уведомления в канал {channel['channel_name']} (ID: {channel['channel_id']})")
             media_group = []
@@ -130,9 +127,8 @@ async def process_media(message: Message, state: FSMContext):
             except TelegramBadRequest as e:
                 logger.error(f"Ошибка отправки уведомления в канал {channel['channel_name']} (ID: {channel['channel_id']}) для заявки №{appeal_id}: {str(e)}")
         recipients = set()
-        async with db.conn.cursor() as cursor:
-            await cursor.execute("SELECT admin_id FROM admins")
-            admins = await cursor.fetchall()
+        async with db_pool.acquire() as conn:
+            admins = await conn.fetch("SELECT admin_id FROM admins")
             for admin in admins:
                 recipients.add(admin["admin_id"])
         recipients.update(MAIN_ADMIN_IDS)
@@ -185,28 +181,21 @@ async def process_media(message: Message, state: FSMContext):
         await message.answer("Неподдерживаемый формат медиа. Приложите фото, видео или кружочек.", reply_markup=keyboard)
         logger.warning(f"Неподдерживаемый формат медиа от @{message.from_user.username} (ID: {message.from_user.id})")
 
-
 @router.callback_query(F.data == "main_menu")
-async def return_to_main_menu(callback: CallbackQuery, state: FSMContext):
+async def return_to_main_menu(callback: CallbackQuery, state: FSMContext, **data):
     user_id = callback.from_user.id
     username = callback.from_user.username
-
-    # Проверка, является ли пользователь администратором
-    db = Database()
-    await db.connect()
+    db_pool = data["db_pool"]
     is_admin = False
-    async with db.conn.cursor() as cursor:
-        await cursor.execute("SELECT admin_id FROM admins WHERE admin_id = ?", (user_id,))
-        admin = await cursor.fetchone()
+    async with db_pool.acquire() as conn:
+        admin = await conn.fetchrow("SELECT admin_id FROM admins WHERE admin_id = $1", user_id)
         if admin or user_id in MAIN_ADMIN_IDS:
             is_admin = True
 
     if state:
         await state.clear()
 
-    # Проверяем тип сообщения
     if callback.message.content_type == 'text':
-        # Если сообщение текстовое, редактируем его
         if is_admin:
             await callback.message.edit_text(
                 "Добро пожаловать, администратор!",
@@ -218,7 +207,6 @@ async def return_to_main_menu(callback: CallbackQuery, state: FSMContext):
                 reply_markup=get_user_menu()
             )
     else:
-        # Если сообщение содержит файл, удаляем его и отправляем новое
         await callback.message.delete()
         if is_admin:
             await callback.message.bot.send_message(
@@ -234,10 +222,9 @@ async def return_to_main_menu(callback: CallbackQuery, state: FSMContext):
             )
 
 @router.callback_query(F.data == "my_appeals_user")
-async def show_my_appeals_user(callback: CallbackQuery):
-    db = Database()
-    await db.connect()
-    appeals = await db.get_user_appeals(callback.from_user.id)
+async def show_my_appeals_user(callback: CallbackQuery, **data):
+    db_pool = data["db_pool"]
+    appeals = await get_user_appeals(db_pool, callback.from_user.id)
     if not appeals:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -249,11 +236,10 @@ async def show_my_appeals_user(callback: CallbackQuery):
     logger.info(f"Пользователь @{callback.from_user.username} (ID: {callback.from_user.id}) запросил свои обращения")
 
 @router.callback_query(F.data.startswith("view_appeal_user_"))
-async def view_appeal_user(callback: CallbackQuery):
+async def view_appeal_user(callback: CallbackQuery, **data):
     appeal_id = int(callback.data.split("_")[-1])
-    db = Database()
-    await db.connect()
-    appeal = await db.get_appeal(appeal_id)
+    db_pool = data["db_pool"]
+    appeal = await get_appeal(db_pool, appeal_id)
     if not appeal:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]

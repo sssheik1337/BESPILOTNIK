@@ -4,7 +4,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import StateFilter
 from keyboards.inline import get_admin_menu, get_base_management_menu, get_admin_panel_menu, get_overdue_menu, get_open_appeals_menu, get_my_appeals_menu, get_remove_channel_menu, get_edit_channel_menu, get_appeal_actions_menu, get_notification_menu, get_response_menu
-from database.models import Database
+from database.db import get_serial_history, get_appeal, take_appeal, postpone_appeal, save_response, close_appeal, delegate_appeal, get_open_appeals, get_assigned_appeals, add_admin, add_notification_channel, get_notification_channels
 from utils.excel_utils import import_serials, export_serials
 from utils.validators import validate_serial
 from config import MAIN_ADMIN_IDS
@@ -29,13 +29,11 @@ class AdminResponse(StatesGroup):
     serial = State()
 
 @router.callback_query(F.data == "serial_history")
-async def serial_history_prompt(callback: CallbackQuery, state: FSMContext):
+async def serial_history_prompt(callback: CallbackQuery, state: FSMContext, **data):
     user_id = callback.from_user.id
-    db = Database()
-    await db.connect()
-    async with db.conn.cursor() as cursor:
-        await cursor.execute("SELECT admin_id FROM admins WHERE admin_id = ?", (user_id,))
-        is_employee = await cursor.fetchone()
+    db_pool = data["db_pool"]
+    async with db_pool.acquire() as conn:
+        is_employee = await conn.fetchrow("SELECT admin_id FROM admins WHERE admin_id = $1", user_id)
     if user_id not in MAIN_ADMIN_IDS and not is_employee:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -51,13 +49,11 @@ async def serial_history_prompt(callback: CallbackQuery, state: FSMContext):
     logger.debug(f"Администратор @{callback.from_user.username} (ID: {user_id}) запросил историю по серийнику")
 
 @router.message(StateFilter(AdminResponse.serial))
-async def process_serial_history(message: Message, state: FSMContext):
+async def process_serial_history(message: Message, state: FSMContext, **data):
     user_id = message.from_user.id
-    db = Database()
-    await db.connect()
-    async with db.conn.cursor() as cursor:
-        await cursor.execute("SELECT admin_id FROM admins WHERE admin_id = ?", (user_id,))
-        is_employee = await cursor.fetchone()
+    db_pool = data["db_pool"]
+    async with db_pool.acquire() as conn:
+        is_employee = await conn.fetchrow("SELECT admin_id FROM admins WHERE admin_id = $1", user_id)
     if user_id not in MAIN_ADMIN_IDS and not is_employee:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -75,7 +71,7 @@ async def process_serial_history(message: Message, state: FSMContext):
         logger.warning(f"Неверный серийный номер {serial} для истории от @{message.from_user.username} (ID: {message.from_user.id})")
         await state.clear()
         return
-    serial_data, history = await db.get_serial_history(serial)
+    serial_data, history = await get_serial_history(serial)
     if not history:
         await message.answer("История по серийному номеру отсутствует.", reply_markup=keyboard)
         logger.info(f"История по серийнику {serial} отсутствует, запрос от @{message.from_user.username} (ID: {message.from_user.id})")
@@ -115,13 +111,11 @@ async def process_serial_history(message: Message, state: FSMContext):
     await state.clear()
 
 @router.callback_query(F.data.startswith("take_appeal_"))
-async def take_appeal(callback: CallbackQuery, state: FSMContext):
-    db = Database()
-    await db.connect()
+async def take_appeal(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data["db_pool"]
     user_id = callback.from_user.id
-    async with db.conn.cursor() as cursor:
-        await cursor.execute("SELECT admin_id FROM admins WHERE admin_id = ?", (user_id,))
-        is_employee = await cursor.fetchone()
+    async with db_pool.acquire() as conn:
+        is_employee = await conn.fetchrow("SELECT admin_id FROM admins WHERE admin_id = $1", user_id)
     if user_id not in MAIN_ADMIN_IDS and not is_employee:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -130,7 +124,7 @@ async def take_appeal(callback: CallbackQuery, state: FSMContext):
         logger.warning(f"Попытка взятия заявки от неавторизованного пользователя @{callback.from_user.username} (ID: {user_id})")
         return
     appeal_id = int(callback.data.split("_")[-1])
-    appeal = await db.get_appeal(appeal_id)
+    appeal = await get_appeal(appeal_id)
     if appeal['status'] not in ["new", "postponed", "overdue"]:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -142,9 +136,9 @@ async def take_appeal(callback: CallbackQuery, state: FSMContext):
         logger.info(f"Попытка повторного взятия заявки №{appeal_id} пользователем @{callback.from_user.username} (ID: {user_id})")
         return
     admin_id = user_id
-    await db.take_appeal(appeal_id, admin_id)
-    appeal = await db.get_appeal(appeal_id)
-    channels = await db.get_notification_channels()
+    await take_appeal(appeal_id, admin_id)
+    appeal = await get_appeal(appeal_id)
+    channels = await get_notification_channels()
     user_full_name = f"{callback.from_user.first_name} {callback.from_user.last_name or ''}".strip()
     channel_text = (f"Заявка №{appeal_id} взята в работу.\n"
                     f"Исполнитель: {user_full_name}, @{callback.from_user.username}\n"
@@ -201,11 +195,10 @@ async def take_appeal(callback: CallbackQuery, state: FSMContext):
     asyncio.create_task(check_overdue(appeal_id, callback.message.bot))
 
 @router.callback_query(F.data.startswith("postpone_appeal_"))
-async def postpone_appeal_notification(callback: CallbackQuery):
-    db = Database()
-    await db.connect()
+async def postpone_appeal_notification(callback: CallbackQuery, **data):
+    db_pool = data["db_pool"]
     appeal_id = int(callback.data.split("_")[-1])
-    await db.postpone_appeal(appeal_id)
+    await postpone_appeal(appeal_id)
     await callback.message.edit_text(
         f"Заявка №{appeal_id} отложена @{callback.from_user.username}",
         reply_markup=get_notification_menu(appeal_id)
@@ -228,13 +221,12 @@ async def respond_appeal(callback: CallbackQuery, state: FSMContext):
     logger.debug(f"Запрос ответа для заявки №{appeal_id} от пользователя @{callback.from_user.username}")
 
 @router.message(StateFilter(AdminResponse.response))
-async def process_response(message: Message, state: FSMContext):
-    data = await state.get_data()
-    appeal_id = data["appeal_id"]
-    db = Database()
-    await db.connect()
-    appeal = await db.get_appeal(appeal_id)
-    await db.save_response(appeal_id, message.text)
+async def process_response(message: Message, state: FSMContext, **data):
+    data_state = await state.get_data()
+    appeal_id = data_state["appeal_id"]
+    db_pool = data["db_pool"]
+    appeal = await get_appeal(appeal_id)
+    await save_response(appeal_id, message.text)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Закрыть заявку", callback_data=f"close_appeal_{appeal_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"view_appeal_{appeal_id}")]
@@ -244,13 +236,12 @@ async def process_response(message: Message, state: FSMContext):
     logger.info(f"Ответ для заявки №{appeal_id} сохранён пользователем @{message.from_user.username}")
 
 @router.callback_query(F.data.startswith("close_appeal_"))
-async def close_appeal(callback: CallbackQuery, state: FSMContext):
+async def close_appeal(callback: CallbackQuery, state: FSMContext, **data):
     appeal_id = int(callback.data.split("_")[-1])
-    db = Database()
-    await db.connect()
-    appeal = await db.get_appeal(appeal_id)
+    db_pool = data["db_pool"]
+    appeal = await get_appeal(appeal_id)
     logger.debug(f"Извлечён ответ для заявки №{appeal_id}: {appeal['response']}")
-    await db.close_appeal(appeal_id)
+    await close_appeal(appeal_id)
     media_files = json.loads(appeal["media_files"]) if appeal["media_files"] else []
     media_group = []
     for media in media_files:
@@ -299,16 +290,15 @@ async def delegate_appeal_start(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text("Ошибка: неверный ID заявки.")
 
 @router.message(StateFilter(AdminResponse.delegate))
-async def process_delegate(message: Message, state: FSMContext):
+async def process_delegate(message: Message, state: FSMContext, **data):
     try:
         new_admin_id = int(message.text.strip())
-        data = await state.get_data()
-        appeal_id = data["appeal_id"]
+        data_state = await state.get_data()
+        appeal_id = data_state["appeal_id"]
         logger.info(f"Начало делегирования заявки №{appeal_id} администратору {new_admin_id}")
 
-        db = Database()
-        await db.connect()
-        await db.delegate_appeal(appeal_id, new_admin_id)
+        db_pool = data["db_pool"]
+        await delegate_appeal(appeal_id, new_admin_id)
 
         # Отправка уведомления новому сотруднику
         try:
@@ -342,12 +332,11 @@ async def process_delegate(message: Message, state: FSMContext):
         logger.error(f"Неизвестная ошибка при делегировании заявки №{appeal_id}: {str(e)}")
 
 @router.callback_query(F.data == "open_appeals")
-async def show_open_appeals(callback: CallbackQuery):
+async def show_open_appeals(callback: CallbackQuery, **data):
     logger.debug(f"Callback open_appeals получен от @{callback.from_user.username} (ID: {callback.from_user.id})")
-    db = Database()
-    await db.connect()
+    db_pool = data["db_pool"]
     admin_id = callback.from_user.id
-    appeals = await db.get_open_appeals(admin_id)
+    appeals = await get_open_appeals(admin_id)
     if not appeals:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -359,11 +348,10 @@ async def show_open_appeals(callback: CallbackQuery):
     logger.info(f"Пользователь @{callback.from_user.username} (ID: {admin_id}) просмотрел открытые заявки ({len(appeals)} шт.)")
 
 @router.callback_query(F.data == "my_appeals")
-async def show_my_appeals(callback: CallbackQuery):
-    db = Database()
-    await db.connect()
+async def show_my_appeals(callback: CallbackQuery, **data):
+    db_pool = data["db_pool"]
     admin_id = callback.from_user.id
-    appeals = await db.get_assigned_appeals(admin_id)
+    appeals = await get_assigned_appeals(admin_id)
     if not appeals:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -375,11 +363,10 @@ async def show_my_appeals(callback: CallbackQuery):
     logger.info(f"Пользователь @{callback.from_user.username} (ID: {admin_id}) просмотрел свои заявки ({len(appeals)} шт.)")
 
 @router.callback_query(F.data.startswith("view_appeal_"))
-async def view_appeal(callback: CallbackQuery, state: FSMContext):
+async def view_appeal(callback: CallbackQuery, state: FSMContext, **data):
     appeal_id = int(callback.data.split("_")[-1])
-    db = Database()
-    await db.connect()
-    appeal = await db.get_appeal(appeal_id)
+    db_pool = data["db_pool"]
+    appeal = await get_appeal(appeal_id)
     if not appeal:
         await callback.message.edit_text("Заявка не найдена.")
         logger.warning(f"Заявка №{appeal_id} не найдена пользователем @{callback.from_user.username}")
@@ -417,7 +404,7 @@ async def view_appeal(callback: CallbackQuery, state: FSMContext):
     logger.info(f"Пользователь @{callback.from_user.username} просмотрел заявку №{appeal_id}")
 
 @router.callback_query(F.data == "stats")
-async def show_stats(callback: CallbackQuery):
+async def show_stats(callback: CallbackQuery, **data):
     if callback.from_user.id not in MAIN_ADMIN_IDS:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -425,13 +412,10 @@ async def show_stats(callback: CallbackQuery):
         await callback.message.edit_text("Доступ запрещён.", reply_markup=keyboard)
         logger.warning(f"Попытка доступа к статистике от неадминистратора @{callback.from_user.username}")
         return
-    db = Database()
-    await db.connect()
-    async with db.conn.cursor() as cursor:
-        await cursor.execute("SELECT COUNT(*) as total, status FROM appeals GROUP BY status")
-        status_counts = await cursor.fetchall()
-        await cursor.execute("SELECT username, appeals_taken FROM admins")
-        admin_stats = await cursor.fetchall()
+    db_pool = data["db_pool"]
+    async with db_pool.acquire() as conn:
+        status_counts = await conn.fetch("SELECT COUNT(*) as total, status FROM appeals GROUP BY status")
+        admin_stats = await conn.fetch("SELECT username, appeals_taken FROM admins")
     if not status_counts and not admin_stats:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -489,7 +473,7 @@ async def add_employee_prompt(callback: CallbackQuery, state: FSMContext):
     logger.debug(f"Запрос добавления сотрудника от @{callback.from_user.username}")
 
 @router.message(StateFilter(AdminResponse.add_employee))
-async def process_add_employee(message: Message, state: FSMContext):
+async def process_add_employee(message: Message, state: FSMContext, **data):
     if message.from_user.id not in MAIN_ADMIN_IDS:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -503,9 +487,8 @@ async def process_add_employee(message: Message, state: FSMContext):
             raise ValueError("Формат: ID @username или ID Нет")
         admin_id = int(parts[0])
         username = parts[1].lstrip("@") if parts[1] != "Нет" else None
-        db = Database()
-        await db.connect()
-        await db.add_admin(admin_id, username)
+        db_pool = data["db_pool"]
+        await add_admin(admin_id, username)
         await message.answer(f"Сотрудник {'@' + username if username else 'без username'} (ID: {admin_id}) добавлен.")
         logger.info(f"Сотрудник {'@' + username if username else 'без username'} (ID: {admin_id}) добавлен пользователем @{message.from_user.username}")
         await state.clear()
@@ -533,7 +516,7 @@ async def add_channel_prompt(callback: CallbackQuery, state: FSMContext):
     logger.debug(f"Запрос добавления канала от @{callback.from_user.username}")
 
 @router.message(StateFilter(AdminResponse.add_channel))
-async def process_add_channel(message: Message, state: FSMContext):
+async def process_add_channel(message: Message, state: FSMContext, **data):
     if message.from_user.id not in MAIN_ADMIN_IDS:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -563,9 +546,8 @@ async def process_add_channel(message: Message, state: FSMContext):
             await message.answer("Канал/группа недоступна или topic_id неверный.")
             logger.error(f"Неверный topic_id {topic_id} для канала {channel_name} от @{message.from_user.username}")
             return
-        db = Database()
-        await db.connect()
-        await db.add_notification_channel(channel_id, channel_name, topic_id)
+        db_pool = data["db_pool"]
+        await add_notification_channel(channel_id, channel_name, topic_id)
         await message.answer(f"Канал/группа {channel_name} добавлена для уведомлений.")
         logger.info(f"Канал/группа {channel_name} (ID: {channel_id}, topic_id: {topic_id}) добавлена пользователем @{message.from_user.username}")
         await state.clear()
@@ -577,7 +559,7 @@ async def process_add_channel(message: Message, state: FSMContext):
         logger.error(f"Ошибка добавления канала: {str(e)} от @{message.from_user.username}")
 
 @router.callback_query(F.data == "remove_channel")
-async def remove_channel_prompt(callback: CallbackQuery):
+async def remove_channel_prompt(callback: CallbackQuery, **data):
     if callback.from_user.id not in MAIN_ADMIN_IDS:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -585,9 +567,8 @@ async def remove_channel_prompt(callback: CallbackQuery):
         await callback.message.edit_text("Доступ запрещён.", reply_markup=keyboard)
         logger.warning(f"Попытка удаления канала от неадминистратора @{callback.from_user.username}")
         return
-    db = Database()
-    await db.connect()
-    channels = await db.get_notification_channels()
+    db_pool = data["db_pool"]
+    channels = await get_notification_channels()
     if not channels:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -599,7 +580,7 @@ async def remove_channel_prompt(callback: CallbackQuery):
     logger.debug(f"Запрос удаления канала от @{callback.from_user.username}")
 
 @router.callback_query(F.data.startswith("remove_channel_"))
-async def process_remove_channel(callback: CallbackQuery):
+async def process_remove_channel(callback: CallbackQuery, **data):
     if callback.from_user.id not in MAIN_ADMIN_IDS:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -608,13 +589,10 @@ async def process_remove_channel(callback: CallbackQuery):
         logger.warning(f"Попытка удаления канала от неадминистратора @{callback.from_user.username}")
         return
     channel_id = int(callback.data.split("_")[-1])
-    db = Database()
-    await db.connect()
-    async with db.conn.cursor() as cursor:
-        await cursor.execute("SELECT channel_name FROM notification_channels WHERE channel_id = ?", (channel_id,))
-        channel_name = (await cursor.fetchone())['channel_name']
-        await cursor.execute("DELETE FROM notification_channels WHERE channel_id = ?", (channel_id,))
-        await db.conn.commit()
+    db_pool = data["db_pool"]
+    async with db_pool.acquire() as conn:
+        channel_name = await conn.fetchval("SELECT channel_name FROM notification_channels WHERE channel_id = $1", channel_id)
+        await conn.execute("DELETE FROM notification_channels WHERE channel_id = $1", channel_id)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
     ])
@@ -622,7 +600,7 @@ async def process_remove_channel(callback: CallbackQuery):
     logger.info(f"Канал/группа {channel_name} (ID: {channel_id}) удалена пользователем @{callback.from_user.username}")
 
 @router.callback_query(F.data == "edit_channel")
-async def edit_channel_prompt(callback: CallbackQuery):
+async def edit_channel_prompt(callback: CallbackQuery, **data):
     if callback.from_user.id not in MAIN_ADMIN_IDS:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -630,9 +608,8 @@ async def edit_channel_prompt(callback: CallbackQuery):
         await callback.message.edit_text("Доступ запрещён.", reply_markup=keyboard)
         logger.warning(f"Попытка редактирования канала от неадминистратора @{callback.from_user.username}")
         return
-    db = Database()
-    await db.connect()
-    channels = await db.get_notification_channels()
+    db_pool = data["db_pool"]
+    channels = await get_notification_channels()
     if not channels:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -662,7 +639,7 @@ async def process_edit_channel_prompt(callback: CallbackQuery, state: FSMContext
     logger.debug(f"Запрос редактирования topic_id для канала ID {channel_id} от @{callback.from_user.username}")
 
 @router.message(StateFilter(AdminResponse.edit_channel))
-async def process_edit_channel(message: Message, state: FSMContext):
+async def process_edit_channel(message: Message, state: FSMContext, **data):
     if message.from_user.id not in MAIN_ADMIN_IDS:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -672,24 +649,21 @@ async def process_edit_channel(message: Message, state: FSMContext):
         return
     try:
         topic_id = int(message.text) if message.text.strip() else None
-        data = await state.get_data()
-        channel_id = data["channel_id"]
-        db = Database()
-        await db.connect()
-        async with db.conn.cursor() as cursor:
-            await cursor.execute("SELECT channel_name FROM notification_channels WHERE channel_id = ?", (channel_id,))
-            channel_name = (await cursor.fetchone())['channel_name']
+        data_state = await state.get_data()
+        channel_id = data_state["channel_id"]
+        db_pool = data["db_pool"]
+        async with db_pool.acquire() as conn:
+            channel_name = await conn.fetchval("SELECT channel_name FROM notification_channels WHERE channel_id = $1", channel_id)
             try:
                 await message.bot.send_message(chat_id=channel_id, message_thread_id=topic_id, text="Тестовое сообщение")
             except TelegramBadRequest:
                 await message.answer("Неверный topic_id или канал/группа недоступна.")
                 logger.error(f"Неверный topic_id {topic_id} для канала {channel_name} от @{message.from_user.username}")
                 return
-            await cursor.execute(
-                "UPDATE notification_channels SET topic_id = ? WHERE channel_id = ?",
-                (topic_id, channel_id)
+            await conn.execute(
+                "UPDATE notification_channels SET topic_id = $1 WHERE channel_id = $2",
+                topic_id, channel_id
             )
-            await db.conn.commit()
         await message.answer(f"Канал/группа {channel_name} обновлена.")
         logger.info(f"Канал/группа {channel_name} (ID: {channel_id}) обновлена с topic_id {topic_id} пользователем @{message.from_user.username}")
         await state.clear()
@@ -701,7 +675,7 @@ async def process_edit_channel(message: Message, state: FSMContext):
         logger.error(f"Ошибка редактирования канала: {str(e)} для канала ID {channel_id} от @{message.from_user.username}")
 
 @router.callback_query(F.data == "list_channels")
-async def list_channels(callback: CallbackQuery):
+async def list_channels(callback: CallbackQuery, **data):
     if callback.from_user.id not in MAIN_ADMIN_IDS:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -709,9 +683,8 @@ async def list_channels(callback: CallbackQuery):
         await callback.message.edit_text("Доступ запрещён.", reply_markup=keyboard)
         logger.warning(f"Попытка просмотра каналов от неадминистратора @{callback.from_user.username}")
         return
-    db = Database()
-    await db.connect()
-    channels = await db.get_notification_channels()
+    db_pool = data["db_pool"]
+    channels = await get_notification_channels()
     if not channels:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -729,14 +702,15 @@ async def list_channels(callback: CallbackQuery):
     logger.info(f"Список каналов запрошен пользователем @{callback.from_user.username}")
 
 @router.message(F.document)
-async def process_import(message: Message):
+async def process_import(message: Message, **data):
+    db_pool = data["db_pool"]
     if message.document.mime_type != "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
         await message.answer("Отправьте Excel-файл.")
         logger.error(f"Неверный формат файла от @{message.from_user.username}")
         return
     file = await message.bot.get_file(message.document.file_id)
     file_io = await message.bot.download_file(file.file_path)
-    result, error = await import_serials(file_io)
+    result, error = await import_serials(file_io, db_pool)
     if error:
         await message.answer(error)
         logger.error(f"Ошибка импорта от @{message.from_user.username}: {error}")
@@ -750,17 +724,10 @@ async def process_import(message: Message):
         await message.answer(response, reply_markup=keyboard)
         logger.info(f"Импорт завершён пользователем @{message.from_user.username}: {response}")
 
-@router.callback_query(F.data == "import_serials")
-async def import_serials_prompt(callback: CallbackQuery):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-    ])
-    await callback.message.edit_text("Отправьте Excel-файл с серийными номерами (столбец 'Serial'):", reply_markup=keyboard)
-    logger.debug(f"Запрос импорта серийников от @{callback.from_user.username}")
-
 @router.callback_query(F.data == "export_serials")
-async def export_serials_handler(callback: CallbackQuery):
-    output = await export_serials()
+async def export_serials_handler(callback: CallbackQuery, **data):
+    db_pool = data["db_pool"]
+    output = await export_serials(db_pool)
     if output is None:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -771,12 +738,20 @@ async def export_serials_handler(callback: CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
     ])
-    # Используем BufferedInputFile для отправки данных из BytesIO
     await callback.message.answer_document(
         document=BufferedInputFile(output.getvalue(), filename="serials_export.xlsx"),
         reply_markup=keyboard
     )
     logger.info(f"Экспорт серийников выполнен пользователем @{callback.from_user.username}")
+
+@router.callback_query(F.data == "import_serials")
+async def import_serials_prompt(callback: CallbackQuery):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+    ])
+    await callback.message.edit_text("Отправьте Excel-файл с серийными номерами (столбец 'Serial'):", reply_markup=keyboard)
+    logger.debug(f"Запрос импорта серийников от @{callback.from_user.username}")
+
 
 @router.callback_query(F.data == "mark_defect")
 async def mark_defect(callback: CallbackQuery, state: FSMContext):
@@ -788,21 +763,19 @@ async def mark_defect(callback: CallbackQuery, state: FSMContext):
     logger.debug(f"Запрос отметки брака от @{callback.from_user.username}")
 
 @router.message(StateFilter(AdminResponse.mark_defect))
-async def process_mark_defect(message: Message, state: FSMContext):
+async def process_mark_defect(message: Message, state: FSMContext, **data):
     try:
         serial, status = message.text.split()
         if status not in ["брак", "возврат", "замена"]:
             await message.answer("Статус должен быть: брак, возврат или замена.")
             logger.error(f"Неверный статус {status} для серийника {serial} от @{message.from_user.username}")
             return
-        db = Database()
-        await db.connect()
-        async with db.conn.cursor() as cursor:
-            await cursor.execute(
-                "UPDATE serials SET return_status = ? WHERE serial = ?",
-                (status, serial)
+        db_pool = data["db_pool"]
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE serials SET return_status = $1 WHERE serial = $2",
+                status, serial
             )
-            await db.conn.commit()
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
         ])
@@ -832,16 +805,14 @@ async def set_new_time_prompt(callback: CallbackQuery, state: FSMContext):
     logger.debug(f"Запрос установки времени просрочки для заявки №{appeal_id} от @{callback.from_user.username}")
 
 @router.message(StateFilter(AdminResponse.new_time))
-async def process_new_time(message: Message, state: FSMContext):
+async def process_new_time(message: Message, state: FSMContext, **data):
     try:
         hours = float(message.text)
-        data = await state.get_data()
-        appeal_id = data["appeal_id"]
-        db = Database()
-        await db.connect()
-        async with db.conn.cursor() as cursor:
-            await cursor.execute("UPDATE appeals SET status = ? WHERE appeal_id = ?", ("in_progress", appeal_id))
-            await db.conn.commit()
+        data_state = await state.get_data()
+        appeal_id = data_state["appeal_id"]
+        db_pool = data["db_pool"]
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE appeals SET status = $1 WHERE appeal_id = $2", "in_progress", appeal_id)
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
         ])
@@ -854,7 +825,7 @@ async def process_new_time(message: Message, state: FSMContext):
         logger.error(f"Неверный формат времени просрочки от @{message.from_user.username}")
 
 @router.callback_query(F.data.startswith("await_specialist_"))
-async def await_specialist(callback: CallbackQuery):
+async def await_specialist(callback: CallbackQuery, **data):
     if callback.from_user.id not in MAIN_ADMIN_IDS:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -863,12 +834,10 @@ async def await_specialist(callback: CallbackQuery):
         logger.warning(f"Попытка перевода заявки в статус 'Ожидает специалиста' от неадминистратора @{callback.from_user.username}")
         return
     appeal_id = int(callback.data.split("_")[-1])
-    db = Database()
-    await db.connect()
-    appeal = await db.get_appeal(appeal_id)
-    async with db.conn.cursor() as cursor:
-        await cursor.execute("UPDATE appeals SET status = ? WHERE appeal_id = ?", ("awaiting_specialist", appeal_id))
-        await db.conn.commit()
+    db_pool = data["db_pool"]
+    appeal = await get_appeal(appeal_id)
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE appeals SET status = $1 WHERE appeal_id = $2", "awaiting_specialist", appeal_id)
     media_files = json.loads(appeal["media_files"]) if appeal["media_files"] else []
     media_group = []
     for media in media_files:
@@ -900,13 +869,11 @@ async def await_specialist(callback: CallbackQuery):
 
 async def check_overdue(appeal_id, bot, hours=24):
     await asyncio.sleep(hours * 3600)
-    db = Database()
-    await db.connect()
-    appeal = await db.get_appeal(appeal_id)
+    db_pool = bot.dp["db_pool"]
+    appeal = await get_appeal(appeal_id)
     if appeal["status"] == "in_progress":
-        async with db.conn.cursor() as cursor:
-            await cursor.execute("UPDATE appeals SET status = ? WHERE appeal_id = ?", ("overdue", appeal_id))
-            await db.conn.commit()
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE appeals SET status = $1 WHERE appeal_id = $2", "overdue", appeal_id)
         for main_admin_id in MAIN_ADMIN_IDS:
             await bot.send_message(
                 main_admin_id,
@@ -917,9 +884,8 @@ async def check_overdue(appeal_id, bot, hours=24):
 
 async def check_delegated_overdue(appeal_id, bot, employee_id):
     await asyncio.sleep(12 * 3600)
-    db = Database()
-    await db.connect()
-    appeal = await db.get_appeal(appeal_id)
+    db_pool = bot.dp["db_pool"]
+    appeal = await get_appeal(appeal_id)
     if appeal["status"] in ["in_progress", "postponed"] and appeal["admin_id"] == employee_id:
         for main_admin_id in MAIN_ADMIN_IDS:
             await bot.send_message(

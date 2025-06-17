@@ -1,37 +1,53 @@
 import asyncio
 import logging
-import os
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.fsm.storage.memory import MemoryStorage
 from config import TOKEN
 from handlers import user_handlers, admin_handlers, common_handlers
+from database.db import initialize_db, close_db
 
-# Указываем абсолютный путь для файла логов
-LOG_FILE_PATH = "/data/bot.log"
-
-# Проверяем, существует ли директория /data, и создаём её, если нет
-os.makedirs(os.path.dirname(LOG_FILE_PATH), exist_ok=True)
-
+# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler(LOG_FILE_PATH),  # Используем абсолютный путь
+        logging.FileHandler("/data/bot.log"),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
+# Middleware для инъекции пула соединений
+class DatabaseMiddleware(BaseMiddleware):
+    def __init__(self, pool):
+        super().__init__()
+        self.pool = pool
+
+    async def __call__(self, handler, event, data):
+        data["db_pool"] = self.pool
+        return await handler(event, data)
+
 async def main():
     bot = Bot(token=TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
+    # Инициализация базы данных
+    pool = await initialize_db()
+
+    # Регистрация middleware
+    dp.update.outer_middleware.register(DatabaseMiddleware(pool))
+
+    # Подключение роутеров
     dp.include_router(user_handlers.router)
     dp.include_router(admin_handlers.router)
     dp.include_router(common_handlers.router)
 
     logger.info("Бот запущен")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await close_db()
+        await bot.session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

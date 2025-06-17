@@ -1,7 +1,7 @@
 import pandas as pd
 import re
 from io import BytesIO
-from database.models import Database
+from database.db import add_serial
 import logging
 
 logger = logging.getLogger(__name__)
@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 def validate_serial(serial):
     return bool(re.match(r'^[A-Za-z0-9]{8,20}$', str(serial)))
 
-async def import_serials(file_io):
+async def import_serials(file_io, db_pool):
     try:
         df = pd.read_excel(file_io)
         if 'Serial' not in df.columns:
@@ -17,15 +17,12 @@ async def import_serials(file_io):
             return None, "Файл должен содержать столбец 'Serial'."
 
         serials = df['Serial'].dropna().astype(str).tolist()
-        db = Database()
-        await db.connect()
 
         result = {'added': 0, 'skipped': 0, 'invalid': []}
         existing_serials = set()
 
-        async with db.conn.cursor() as cursor:
-            await cursor.execute("SELECT serial FROM serials")
-            rows = await cursor.fetchall()
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT serial FROM serials")
             existing_serials.update(row['serial'] for row in rows)
 
         for serial in serials:
@@ -34,7 +31,7 @@ async def import_serials(file_io):
                 result['skipped'] += 1
                 continue
             if validate_serial(serial):
-                await db.add_serial(serial)
+                await add_serial(serial)
                 logger.info(f"Добавлен серийный номер {serial}")
                 result['added'] += 1
                 existing_serials.add(serial)
@@ -49,17 +46,14 @@ async def import_serials(file_io):
         logger.error(f"Ошибка при импорте серийных номеров: {str(e)}")
         return None, f"Ошибка при обработке файла: {str(e)}"
 
-async def export_serials():
+async def export_serials(db_pool):
     try:
-        db = Database()
-        await db.connect()
-        async with db.conn.cursor() as cursor:
-            await cursor.execute("""
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("""
                 SELECT s.serial, s.appeal_count, s.return_status, a.username, a.created_time, a.taken_time, a.closed_time
                 FROM serials s
                 LEFT JOIN appeals a ON s.serial = a.serial
             """)
-            rows = await cursor.fetchall()
 
         data = []
         for row in rows:
