@@ -1,21 +1,28 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from config import MAIN_ADMIN_IDS
+import logging
+
+logger = logging.getLogger(__name__)
 
 def get_user_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📝 Создать обращение", callback_data="create_appeal")],
-        [InlineKeyboardButton(text="📜 История по серийнику", callback_data="serial_history")],
         [InlineKeyboardButton(text="📋 Мои обращения", callback_data="my_appeals_user")]
     ])
+    logger.debug("Создана клавиатура для пользовательского меню")
+    return keyboard
 
 def get_admin_menu(user_id):
-    return InlineKeyboardMarkup(inline_keyboard=[
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Открытые заявки", callback_data="open_appeals")],
         [InlineKeyboardButton(text="📋 Мои заявки", callback_data="my_appeals")],
+        [InlineKeyboardButton(text="📜 История по серийнику", callback_data="serial_history")],  # Добавлено
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
         [InlineKeyboardButton(text="🔧 Управление базой", callback_data="manage_base")],
         [InlineKeyboardButton(text="🔐 Админ-панель", callback_data="admin_panel")]
     ])
+    logger.debug(f"Создана клавиатура для админского меню для пользователя ID {user_id}")
+    return keyboard
 
 def get_my_appeals_user_menu(appeals):
     keyboard = []
@@ -27,6 +34,7 @@ def get_my_appeals_user_menu(appeals):
             )
         ])
     keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+    logger.debug(f"Создана клавиатура для 'Мои обращения' пользователя с {len(appeals)} заявками")
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_open_appeals_menu(appeals):
@@ -39,6 +47,7 @@ def get_open_appeals_menu(appeals):
             )
         ])
     keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+    logger.debug(f"Создана клавиатура для 'Открытые заявки' с {len(appeals)} заявками")
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_my_appeals_menu(appeals):
@@ -51,6 +60,7 @@ def get_my_appeals_menu(appeals):
             )
         ])
     keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+    logger.debug(f"Создана клавиатура для 'Мои заявки' с {len(appeals)} заявками")
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_appeal_actions_menu(appeal_id, status):
@@ -62,13 +72,19 @@ def get_appeal_actions_menu(appeal_id, status):
             [InlineKeyboardButton(text="📝 Ответить", callback_data=f"respond_appeal_{appeal_id}")],
             [InlineKeyboardButton(text="🔄 Делегировать", callback_data=f"delegate_appeal_{appeal_id}")]
         ])
-    keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="open_appeals")])
+    keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="my_appeals")])
+    logger.debug(f"Создана клавиатура действий для заявки №{appeal_id} со статусом {status}")
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_notification_menu(appeal_id):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Взять в работу", callback_data=f"take_appeal_{appeal_id}")],
         [InlineKeyboardButton(text="⏳ Отложить", callback_data=f"postpone_appeal_{appeal_id}")]
+    ])
+
+def get_channel_take_button(appeal_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Взять в работу", callback_data=f"take_appeal_{appeal_id}")]
     ])
 
 def get_response_menu(appeal_id):
@@ -104,6 +120,7 @@ def get_remove_channel_menu(channels):
             )
         ])
     keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+    logger.debug(f"Создана клавиатура для удаления каналов с {len(channels)} каналами")
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_edit_channel_menu(channels):
@@ -116,6 +133,7 @@ def get_edit_channel_menu(channels):
             )
         ])
     keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+    logger.debug(f"Создана клавиатура для редактирования каналов с {len(channels)} каналами")
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_overdue_menu(appeal_id):

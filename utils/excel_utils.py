@@ -6,10 +6,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-
 def validate_serial(serial):
     return bool(re.match(r'^[A-Za-z0-9]{8,20}$', str(serial)))
-
 
 async def import_serials(file_io):
     try:
@@ -51,7 +49,6 @@ async def import_serials(file_io):
         logger.error(f"Ошибка при импорте серийных номеров: {str(e)}")
         return None, f"Ошибка при обработке файла: {str(e)}"
 
-
 async def export_serials():
     try:
         db = Database()
@@ -61,20 +58,23 @@ async def export_serials():
                 SELECT s.serial, s.appeal_count, s.return_status, a.username, a.created_time, a.taken_time, a.closed_time
                 FROM serials s
                 LEFT JOIN appeals a ON s.serial = a.serial
-                WHERE s.appeal_count > 0
             """)
             rows = await cursor.fetchall()
 
         data = []
         for row in rows:
+            username = row['username'] or 'Не назначен'
+            created_time = row['created_time'] or 'Нет обращений'
+            taken_time = row['taken_time'] or 'Нет обращений'
+            closed_time = row['closed_time'] or 'Нет обращений'
             data.append({
                 'Serial': row['serial'],
                 'Appeal Count': row['appeal_count'],
                 'Return Status': row['return_status'] or 'Не указан',
-                'Admin Username': row['username'] or 'Не назначен',
-                'Created Time': row['created_time'] or '',
-                'Taken Time': row['taken_time'] or '',
-                'Closed Time': row['closed_time'] or ''
+                'Admin Username': username,
+                'Created Time': created_time,
+                'Taken Time': taken_time,
+                'Closed Time': closed_time
             })
             logger.info(f"Экспортирован серийный номер {row['serial']}")
 
