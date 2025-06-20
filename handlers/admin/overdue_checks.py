@@ -16,8 +16,8 @@ router = Router()
 class AdminResponse(StatesGroup):
     new_time = State()
 
-async def check_overdue(appeal_id, bot, hours=1):
-    await asyncio.sleep(hours * 60)
+async def check_overdue(appeal_id, bot, hours=12):
+    await asyncio.sleep(hours * 3600)
     db_pool = await get_db_pool()
     appeal = await get_appeal(appeal_id)
     if appeal["status"] == "in_progress":
@@ -37,7 +37,7 @@ async def check_overdue(appeal_id, bot, hours=1):
         logger.info(f"Заявка №{appeal_id} просрочена")
 
 async def check_delegated_overdue(appeal_id, bot, employee_id):
-    await asyncio.sleep(12 * 60)
+    await asyncio.sleep(12 * 3600)
     db_pool = await get_db_pool()
     appeal = await get_appeal(appeal_id)
     if appeal["status"] in ["in_progress", "postponed", "replacement_process"] and appeal["admin_id"] == employee_id:
