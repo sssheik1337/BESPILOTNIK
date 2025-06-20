@@ -1,11 +1,11 @@
-TOKEN = "8133341294:AAHtIBKBLdsijXlF_NQAWyXNJF2rGy57om0"
-MAIN_ADMIN_IDS = [7797651918]  # ID главных админов
+TOKEN = "ВВЕСТИ ТОКЕН БОТА"
+MAIN_ADMIN_IDS = [11111111, 222222222]  # ID главных админов через запятую
 DB_PATH = "/data/bot.db"  # Путь к SQLite базе
 
 DB_CONFIG = {
-    "user": "shimmerwtf",
-    "password": "Merryweather4670!",
-    "database": "vorobushek",
-    "host": "4lenosos-shimmerwtf.db-msk0.amvera.tech",
+    "user": "ЛОГИН",
+    "password": "ПАРОЛЬ",
+    "database": "ИМЯ БАЗЫ ДАННЫХ",
+    "host": "Ссылка на хост POSTGRESQL",
     "port": 5432
 }

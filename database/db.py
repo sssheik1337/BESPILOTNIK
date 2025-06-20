@@ -1,4 +1,3 @@
-# db.py
 import asyncpg
 from datetime import datetime, timedelta
 import json
@@ -66,6 +65,7 @@ async def create_tables():
                 taken_time TEXT,
                 closed_time TEXT,
                 response TEXT,
+                new_serial TEXT,
                 FOREIGN KEY (serial) REFERENCES serials (serial)
             )
         """)
@@ -91,7 +91,7 @@ async def add_serial(serial):
         try:
             await conn.execute(
                 "INSERT INTO serials (serial, upload_date, status) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-                serial, datetime.now().isoformat(), "active"
+                serial, datetime.now().strftime("%Y-%m-%dT%H:%M"), "active"
             )
             rowcount = await conn.fetchval("SELECT COUNT(*) FROM serials WHERE serial = $1", serial)
             if rowcount == 0:
@@ -106,10 +106,17 @@ async def add_appeal(serial, username, description, media_files, user_id):
     async with pool.acquire() as conn:
         try:
             async with conn.transaction():
+                serial_exists = await conn.fetchrow(
+                    "SELECT serial FROM serials WHERE serial = $1", serial
+                )
+                if not serial_exists:
+                    logger.error(f"Серийный номер {serial} не найден в базе")
+                    raise ValueError(f"Серийный номер {serial} не найден в базе")
+
                 result = await conn.fetchrow(
                     "INSERT INTO appeals (serial, username, description, media_files, status, user_id, created_time) "
                     "VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING appeal_id",
-                    serial, username, description, json.dumps(media_files), "new", user_id, datetime.now().isoformat()
+                    serial, username, description, json.dumps(media_files), "new", user_id, datetime.now().strftime("%Y-%m-%dT%H:%M")
                 )
                 appeal_id = result['appeal_id']
                 await conn.execute(
@@ -117,15 +124,19 @@ async def add_appeal(serial, username, description, media_files, user_id):
                     serial
                 )
                 appeal_count = await conn.fetchval("SELECT appeal_count FROM serials WHERE serial = $1", serial)
-                logger.info(f"Заявка №{appeal_id} создана для серийника {serial} пользователем @{username} (ID: {user_id})")
+                logger.info(
+                    f"Заявка №{appeal_id} создана для серийника {serial} пользователем @{username} (ID: {user_id})")
                 return appeal_id, appeal_count
+        except ValueError as e:
+            logger.error(f"Ошибка при создании заявки для серийника {serial}: {str(e)}")
+            raise
         except Exception as e:
-            logger.error(f"Ошибка при создании заявки для серийника {serial}: {e}")
+            logger.error(f"Неизвестная ошибка при создании заявки для серийника {serial}: {str(e)}")
             raise
 
 async def check_duplicate_appeal(serial, description, user_id):
     async with pool.acquire() as conn:
-        time_threshold = (datetime.now() - timedelta(hours=24)).isoformat()
+        time_threshold = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M")
         result = await conn.fetchrow(
             "SELECT * FROM appeals WHERE serial = $1 AND description = $2 AND user_id = $3 "
             "AND status IN ('new', 'in_progress', 'postponed') AND created_time >= $4",
@@ -138,9 +149,13 @@ async def check_duplicate_appeal(serial, description, user_id):
 async def take_appeal(appeal_id, admin_id):
     async with pool.acquire() as conn:
         async with conn.transaction():
+            appeal = await conn.fetchrow("SELECT status FROM appeals WHERE appeal_id = $1", appeal_id)
+            if appeal and appeal['status'] not in ['new', 'postponed', 'overdue', 'replacement_process', 'awaiting_specialist']:
+                logger.error(f"Заявка №{appeal_id} не может быть взята: статус {appeal['status']}")
+                raise ValueError("Заявка не может быть взята в работу")
             await conn.execute(
                 "UPDATE appeals SET status = $1, admin_id = $2, taken_time = $3 WHERE appeal_id = $4",
-                "in_progress", admin_id, datetime.now().isoformat(), appeal_id
+                "in_progress", admin_id, datetime.now().strftime("%Y-%m-%dT%H:%M"), appeal_id
             )
             await conn.execute(
                 "UPDATE admins SET appeals_taken = appeals_taken + 1 WHERE admin_id = $1",
@@ -163,9 +178,13 @@ async def delegate_appeal(appeal_id, new_admin_id):
 
 async def close_appeal(appeal_id):
     async with pool.acquire() as conn:
+        appeal = await conn.fetchrow("SELECT status FROM appeals WHERE appeal_id = $1", appeal_id)
+        if appeal and appeal['status'] not in ['in_progress', 'postponed', 'replacement_process', 'awaiting_specialist']:
+            logger.error(f"Заявка №{appeal_id} не может быть закрыта: статус {appeal['status']}")
+            raise ValueError("Заявка не может быть закрыта")
         await conn.execute(
             "UPDATE appeals SET status = $1, closed_time = $2 WHERE appeal_id = $3",
-            "processed", datetime.now().isoformat(), appeal_id
+            "processed", datetime.now().strftime("%Y-%m-%dT%H:%M"), appeal_id
         )
         logger.info(f"Заявка №{appeal_id} закрыта")
 
@@ -211,6 +230,12 @@ async def add_admin(admin_id, username, is_main_admin=False):
         )
         logger.info(f"Сотрудник @{username} (admin_id: {admin_id}, is_main_admin: {is_main_admin}) добавлен в базу")
 
+async def get_admins():
+    async with pool.acquire() as conn:
+        admins = await conn.fetch("SELECT admin_id, username FROM admins")
+        logger.debug(f"Запрошены администраторы, найдено: {len(admins)}")
+        return admins
+
 async def add_notification_channel(channel_id, channel_name, topic_id=None):
     async with pool.acquire() as conn:
         await conn.execute(
@@ -228,7 +253,8 @@ async def get_notification_channels():
 async def get_assigned_appeals(admin_id):
     async with pool.acquire() as conn:
         appeals = await conn.fetch(
-            "SELECT * FROM appeals WHERE admin_id = $1 AND status IN ('in_progress', 'postponed')", admin_id
+            "SELECT * FROM appeals WHERE admin_id = $1 AND status IN ('in_progress', 'postponed', 'replacement_process', 'awaiting_specialist')",
+            admin_id
         )
         logger.info(f"Запрошены заявки сотрудника ID {admin_id}, найдено: {len(appeals)}")
         return appeals
@@ -244,8 +270,77 @@ async def get_user_appeals(user_id):
 async def get_open_appeals(admin_id):
     async with pool.acquire() as conn:
         appeals = await conn.fetch(
-            "SELECT * FROM appeals WHERE status IN ('new', 'postponed', 'overdue') AND (admin_id IS NULL OR admin_id != $1)",
+            "SELECT * FROM appeals WHERE status IN ('new', 'postponed', 'overdue', 'replacement_process', 'awaiting_specialist') AND (admin_id IS NULL OR admin_id != $1)",
             admin_id
         )
         logger.info(f"Запрошены открытые заявки для сотрудника ID {admin_id}, найдено: {len(appeals)}")
         return appeals
+
+async def mark_defect(serial, status):
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE serials SET return_status = $1 WHERE serial = $2",
+                status, serial
+            )
+            logger.info(f"Серийный номер {serial} отмечен как {status}")
+
+async def start_replacement(appeal_id, old_serial, status="replacement_process"):
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            current_status = await conn.fetchval(
+                "SELECT status FROM appeals WHERE appeal_id = $1", appeal_id
+            )
+            if current_status == "replacement_process":
+                logger.warning(f"Заявка №{appeal_id} уже в статусе 'процесс замены'")
+                raise ValueError("Заявка уже в процессе замены")
+            await conn.execute(
+                "UPDATE appeals SET status = $1 WHERE appeal_id = $2",
+                status, appeal_id
+            )
+            await conn.execute(
+                "UPDATE serials SET return_status = 'Возврат' WHERE serial = $1",
+                old_serial
+            )
+            logger.info(f"Заявка №{appeal_id} переведена в статус 'процесс замены' для серийника {old_serial}")
+
+async def complete_replacement(appeal_id, new_serial, response=None):
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            serial_exists = await conn.fetchrow(
+                "SELECT serial FROM serials WHERE serial = $1", new_serial
+            )
+            if not serial_exists:
+                logger.error(f"Новый серийный номер {new_serial} не найден в базе")
+                raise ValueError(f"Новый серийный номер {new_serial} не найден в базе")
+
+            await conn.execute(
+                "UPDATE appeals SET new_serial = $1, status = $2, response = $3, closed_time = $4 WHERE appeal_id = $5",
+                new_serial, "processed", response, datetime.now().strftime("%Y-%m-%dT%H:%M"), appeal_id
+            )
+            logger.info(f"Замена завершена для заявки №{appeal_id}, новый серийник: {new_serial}, ответ: {response}")
+
+async def get_replacement_appeals(serial=None):
+    async with pool.acquire() as conn:
+        if serial:
+            appeals = await conn.fetch(
+                "SELECT * FROM appeals WHERE status IN ('new', 'in_progress', 'postponed', 'overdue') AND serial = $1",
+                serial
+            )
+        else:
+            appeals = await conn.fetch(
+                "SELECT * FROM appeals WHERE status IN ('new', 'in_progress', 'postponed', 'overdue')"
+            )
+        logger.info(f"Запрошены заявки для замены (серийник: {serial or 'все'}), найдено: {len(appeals)}")
+        return appeals
+
+async def get_closed_appeals(page=0, limit=10):
+    offset = page * limit
+    async with pool.acquire() as conn:
+        appeals = await conn.fetch(
+            "SELECT * FROM appeals WHERE status = 'processed' ORDER BY closed_time DESC LIMIT $1 OFFSET $2",
+            limit, offset
+        )
+        total = await conn.fetchval("SELECT COUNT(*) FROM appeals WHERE status = 'processed'")
+        logger.info(f"Запрошены закрытые заявки, найдено: {len(appeals)}, всего: {total}, страница: {page}")
+        return appeals, total

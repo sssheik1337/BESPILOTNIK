@@ -2,6 +2,7 @@ import pandas as pd
 import re
 from io import BytesIO
 from database.db import add_serial
+from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ async def export_serials(db_pool):
     try:
         async with db_pool.acquire() as conn:
             rows = await conn.fetch("""
-                SELECT s.serial, s.appeal_count, s.return_status, a.username, a.created_time, a.taken_time, a.closed_time
+                SELECT s.serial, s.appeal_count, s.return_status, a.username, a.created_time, a.taken_time, a.closed_time, a.new_serial
                 FROM serials s
                 LEFT JOIN appeals a ON s.serial = a.serial
             """)
@@ -58,9 +59,31 @@ async def export_serials(db_pool):
         data = []
         for row in rows:
             username = row['username'] or 'Не назначен'
-            created_time = row['created_time'] or 'Нет обращений'
-            taken_time = row['taken_time'] or 'Нет обращений'
-            closed_time = row['closed_time'] or 'Нет обращений'
+            created_time = row['created_time']
+            if created_time:
+                try:
+                    created_time = datetime.strptime(created_time, "%Y-%m-%dT%H:%M").strftime("%Y-%m-%d %H:%M")
+                except ValueError:
+                    created_time = created_time
+            else:
+                created_time = 'Нет обращений'
+            taken_time = row['taken_time']
+            if taken_time:
+                try:
+                    taken_time = datetime.strptime(taken_time, "%Y-%m-%dT%H:%M").strftime("%Y-%m-%d %H:%M")
+                except ValueError:
+                    taken_time = taken_time
+            else:
+                taken_time = 'Нет обращений'
+            closed_time = row['closed_time']
+            if closed_time:
+                try:
+                    closed_time = datetime.strptime(closed_time, "%Y-%m-%dT%H:%M").strftime("%Y-%m-%d %H:%M")
+                except ValueError:
+                    closed_time = closed_time
+            else:
+                closed_time = 'Нет обращений'
+            new_serial = row['new_serial'] or 'Не указан'
             data.append({
                 'Serial': row['serial'],
                 'Appeal Count': row['appeal_count'],
@@ -68,7 +91,8 @@ async def export_serials(db_pool):
                 'Admin Username': username,
                 'Created Time': created_time,
                 'Taken Time': taken_time,
-                'Closed Time': closed_time
+                'Closed Time': closed_time,
+                'New Serial': new_serial
             })
             logger.info(f"Экспортирован серийный номер {row['serial']}")
 

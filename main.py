@@ -3,7 +3,8 @@ import logging
 from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.fsm.storage.memory import MemoryStorage
 from config import TOKEN
-from handlers import user_handlers, admin_handlers, common_handlers
+from handlers import user_handlers, common_handlers
+from handlers.admin import serial_history, appeal_actions, admin_panel, defect_management, base_management, overdue_checks, closed_appeals
 from database.db import initialize_db, close_db
 
 # Настройка логирования
@@ -30,24 +31,24 @@ class DatabaseMiddleware(BaseMiddleware):
 async def main():
     bot = Bot(token=TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
-
-    # Инициализация базы данных
     pool = await initialize_db()
-
-    # Регистрация middleware
     dp.update.outer_middleware.register(DatabaseMiddleware(pool))
-
-    # Подключение роутеров
     dp.include_router(user_handlers.router)
-    dp.include_router(admin_handlers.router)
     dp.include_router(common_handlers.router)
-
+    dp.include_router(serial_history.router)
+    dp.include_router(appeal_actions.router)
+    dp.include_router(admin_panel.router)
+    dp.include_router(defect_management.router)
+    dp.include_router(base_management.router)
+    dp.include_router(overdue_checks.router)
+    dp.include_router(closed_appeals.router)
     logger.info("Бот запущен")
     try:
         await dp.start_polling(bot)
     finally:
         await close_db()
         await bot.session.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
