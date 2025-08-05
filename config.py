@@ -1,11 +1,11 @@
-TOKEN = "ВВЕСТИ ТОКЕН БОТА"
-MAIN_ADMIN_IDS = [11111111, 222222222]  # ID главных админов через запятую
+TOKEN = "8133341294:AAFoIvZhlUNj5O_vgHLQ-m7WJu6rTMYMfQk"
+MAIN_ADMIN_IDS = [6805013473, 7797651918]  # ID главных админов
 DB_PATH = "/data/bot.db"  # Путь к SQLite базе
 
 DB_CONFIG = {
-    "user": "ЛОГИН",
-    "password": "ПАРОЛЬ",
-    "database": "ИМЯ БАЗЫ ДАННЫХ",
-    "host": "Ссылка на хост POSTGRESQL",
+    "user": "postgres",
+    "password": "Merryweather4670!",
+    "database": "musorok",
+    "host": "localhost",
     "port": 5432
 }

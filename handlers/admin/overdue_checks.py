@@ -6,6 +6,7 @@ from aiogram.filters import StateFilter
 from keyboards.inline import get_overdue_menu
 from database.db import get_appeal, get_db_pool
 from config import MAIN_ADMIN_IDS
+from utils.statuses import APPEAL_STATUSES
 import asyncio
 import logging
 

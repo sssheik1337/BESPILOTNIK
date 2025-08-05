@@ -7,15 +7,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 def validate_serial(serial):
-    return bool(re.match(r'^[A-Za-z0-9]{8,20}$', str(serial)))
+    return bool(re.match(r'^[A-Za-z0-9]{6,20}$', str(serial)))
+
 
 async def import_serials(file_io, db_pool):
     try:
         df = pd.read_excel(file_io)
         if 'Serial' not in df.columns:
             logger.error("Отсутствует столбец 'Serial' в загруженном файле")
-            return None, "Файл должен содержать столбец 'Serial'."
+            return None, "Файл должен содержать столбец 'Serial'.", None
 
         serials = df['Serial'].dropna().astype(str).tolist()
 
@@ -26,26 +28,48 @@ async def import_serials(file_io, db_pool):
             rows = await conn.fetch("SELECT serial FROM serials")
             existing_serials.update(row['serial'] for row in rows)
 
-        for serial in serials:
-            if serial in existing_serials:
-                logger.info(f"Серийный номер {serial} уже существует, пропущен")
-                result['skipped'] += 1
-                continue
-            if validate_serial(serial):
-                await add_serial(serial)
-                logger.info(f"Добавлен серийный номер {serial}")
-                result['added'] += 1
-                existing_serials.add(serial)
-            else:
-                logger.warning(f"Невалидный серийный номер {serial}")
-                result['invalid'].append(serial)
+            valid_serials = []
+            for i, serial in enumerate(serials):
+                if serial in existing_serials:
+                    logger.info(f"Серийный номер {serial} уже существует, пропущен")
+                    result['skipped'] += 1
+                    continue
+                if validate_serial(serial):
+                    valid_serials.append(serial)
+                else:
+                    logger.warning(f"Невалидный серийный номер {serial}")
+                    result['invalid'].append(serial)
+
+                if (i + 1) % 100 == 0 or i == len(serials) - 1:
+                    logger.info(f"Обработано {i + 1} серийных номеров")
+
+            if valid_serials:
+                await conn.executemany(
+                    "INSERT INTO serials (serial, appeal_count) VALUES ($1, 0) ON CONFLICT DO NOTHING",
+                    [(serial,) for serial in valid_serials]
+                )
+                result['added'] = len(valid_serials)
+                for serial in valid_serials:
+                    logger.info(f"Добавлен серийный номер {serial}")
+                    existing_serials.add(serial)
+
+        # Создаём Excel-файл с невалидными номерами, если они есть
+        invalid_file = None
+        if result['invalid']:
+            invalid_df = pd.DataFrame({'Invalid Serial': result['invalid']})
+            output = BytesIO()
+            invalid_df.to_excel(output, index=False)
+            output.seek(0)
+            invalid_file = output
+            logger.info(f"Создан Excel-файл с {len(result['invalid'])} невалидными номерами")
 
         logger.info(
             f"Импорт завершён: добавлено {result['added']}, пропущено {result['skipped']}, невалидных {len(result['invalid'])}")
-        return result, None
+        return result, None, invalid_file
     except Exception as e:
         logger.error(f"Ошибка при импорте серийных номеров: {str(e)}")
-        return None, f"Ошибка при обработке файла: {str(e)}"
+        return None, f"Ошибка при обработке файла: {str(e)}", None
+
 
 async def export_serials(db_pool):
     try:

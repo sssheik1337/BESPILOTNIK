@@ -2,7 +2,7 @@ import re
 from aiogram.types import Message
 
 def validate_serial(serial):
-    pattern = r'^[A-Za-z0-9]{8,20}$'
+    pattern = r'^[A-Za-z0-9]{6,20}$'
     return bool(re.match(pattern, serial))
 
 def validate_media(message: Message):
