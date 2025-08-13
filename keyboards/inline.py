@@ -28,17 +28,14 @@ def get_exam_menu():
 def get_admin_menu(user_id):
     keyboard = []
     keyboard.append([InlineKeyboardButton(text="📋 Открытые заявки", callback_data="open_appeals")])
-    keyboard.append([InlineKeyboardButton(text="📌 Мои заявки", callback_data="my_appeals")])
-    keyboard.append([InlineKeyboardButton(text="🔍 История по серийнику", callback_data="serial_history")])
-    keyboard.append([InlineKeyboardButton(text="📊 Статистика", callback_data="stats")])
     keyboard.append([InlineKeyboardButton(text="🗂️ Закрытые заявки", callback_data="closed_appeals")])
-    keyboard.append([InlineKeyboardButton(text="🛠 Брак/Возврат/Замена", callback_data="defect_menu")])
+    keyboard.append([InlineKeyboardButton(text="📌 Мои заявки", callback_data="my_appeals")])
     keyboard.append([InlineKeyboardButton(text="📝 Экзамены", callback_data="exam_menu")])
+    keyboard.append([InlineKeyboardButton(text="🔍 История по серийнику", callback_data="serial_history")])
+    keyboard.append([InlineKeyboardButton(text="🛠 Брак/Возврат/Замена", callback_data="defect_menu")])
     if user_id in MAIN_ADMIN_IDS:
         keyboard.extend([
-            [InlineKeyboardButton(text="⚙️ Управление базой", callback_data="manage_base")],
-            [InlineKeyboardButton(text="👨‍💼 Панель администратора", callback_data="admin_panel")],
-            [InlineKeyboardButton(text="👥 Проверить заявки сотрудников", callback_data="check_employee_appeals")]
+            [InlineKeyboardButton(text="👨‍💼 Панель администратора", callback_data="admin_panel")]
         ])
     logger.debug(f"Создана клавиатура админского меню для пользователя ID {user_id}")
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -83,7 +80,7 @@ def get_appeal_actions_menu(appeal_id, status):
         keyboard.append([InlineKeyboardButton(text="Взять в работу", callback_data=f"take_appeal_{appeal_id}")])
     else:
         keyboard.extend([
-            [InlineKeyboardButton(text="Добавить ответ", callback_data=f"reply_appeal_{appeal_id}")],
+            [InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_appeal_{appeal_id}")],
             [InlineKeyboardButton(text="Делегировать", callback_data=f"delegate_appeal_{appeal_id}")],
             [InlineKeyboardButton(text="Требуется выезд", callback_data=f"await_specialist_{appeal_id}")]
         ])
@@ -107,13 +104,13 @@ def get_my_appeals_menu(appeals, page, total_appeals):
             nav_buttons.append(InlineKeyboardButton(text="Следующая ➡️", callback_data=f"employee_appeals_page_{page+1}"))
     if nav_buttons:
         keyboard.append(nav_buttons)
-    keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="check_employee_appeals")])
+    keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
     logger.debug(f"Создана клавиатура для 'Мои заявки' с {len(appeals)} заявками на странице {page}")
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_response_menu(appeal_id):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Добавить ответ", callback_data=f"reply_appeal_{appeal_id}")],
+        [InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_appeal_{appeal_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"view_appeal_{appeal_id}")]
     ])
 
@@ -137,6 +134,9 @@ def get_base_management_menu():
 
 def get_admin_panel_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Проверить заявки сотрудников", callback_data="check_employee_appeals")],
+        [InlineKeyboardButton(text="📊 Статистика сотрудников", callback_data="stats")],
+        [InlineKeyboardButton(text="⚙️ Управление базой", callback_data="manage_base")],
         [InlineKeyboardButton(text="👤 Добавить сотрудника", callback_data="add_employee")],
         [InlineKeyboardButton(text="📢 Добавить канал/группу", callback_data="add_channel")],
         [InlineKeyboardButton(text="🗑 Удалить канал/группу", callback_data="remove_channel")],

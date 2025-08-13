@@ -16,6 +16,30 @@ router = Router()
 class AdminResponse(StatesGroup):
     serial = State()
 
+async def show_appeal_page(message: Message, state: FSMContext, history: list, page: int, serial_data: dict):
+    if not history:  # Проверяем, пустой ли список обращений
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+        ])
+        await message.answer(f"Обращений по серийному номеру {serial_data.get('serial')} не найдено.", reply_markup=keyboard)
+        logger.info(f"Нет обращений для серийного номера {serial_data.get('serial')} от @{message.from_user.username}")
+        return
+    appeal = history[page]
+    response = (f"Заявка №{appeal['appeal_id']}:\n"
+                f"Серийный номер: {appeal['serial']}\n"
+                f"Статус: {appeal['status']}\n"
+                f"Описание: {appeal['description']}\n"
+                f"Дата создания: {appeal['created_time']}\n"
+                f"Ответ: {appeal['response'] or 'Нет ответа'}")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    if page > 0:
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Предыдущая", callback_data=f"serial_history_page_{page-1}")])
+    if page + 1 < len(history):
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text="Следующая ➡️", callback_data=f"serial_history_page_{page+1}")])
+    keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+    await message.answer(response, reply_markup=keyboard)
+    logger.debug(f"Показана страница {page} истории серийного номера {serial_data.get('serial')} для @{message.from_user.username}")
+
 @router.callback_query(F.data == "serial_history")
 async def serial_history_prompt(callback: CallbackQuery, state: FSMContext, **data):
     user_id = callback.from_user.id
@@ -44,14 +68,6 @@ async def serial_history_prompt(callback: CallbackQuery, state: FSMContext, **da
 
 @router.message(StateFilter(AdminResponse.serial))
 async def process_serial_history(message: Message, state: FSMContext, **data):
-    serial = message.text.strip()
-    if not validate_serial(serial):
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-        ])
-        await message.answer("Неверный формат серийного номера. Попробуйте снова:", reply_markup=keyboard)
-        logger.warning(f"Неверный формат серийного номера {serial} от @{message.from_user.username}")
-        return
     db_pool = data.get("db_pool")
     if not db_pool:
         logger.error("db_pool отсутствует в data")
@@ -59,64 +75,30 @@ async def process_serial_history(message: Message, state: FSMContext, **data):
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
         ]))
         return
+    serial = message.text.strip()
+    if not validate_serial(serial):
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+        ])
+        await message.answer("Некорректный серийный номер. Введите заново:", reply_markup=keyboard)
+        logger.warning(f"Некорректный серийный номер {serial} от @{message.from_user.username} (ID: {message.from_user.id})")
+        return
     serial_data, appeals = await get_serial_history(serial)
     if not serial_data:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
         ])
         await message.answer(f"Серийный номер {serial} не найден.", reply_markup=keyboard)
-        logger.warning(f"Серийный номер {serial} не найден пользователем @{message.from_user.username}")
+        logger.warning(f"Серийный номер {serial} не найден для @{message.from_user.username}")
         return
-    await state.update_data(serial=serial, history=appeals, serial_data=serial_data, page=0)
+    await state.update_data(serial=serial, history=appeals, serial_data=serial_data)
+    try:
+        await message.delete()
+    except TelegramBadRequest as e:
+        logger.error(f"Ошибка удаления сообщения от @{message.from_user.username} (ID: {message.from_user.id}): {str(e)}")
     await show_appeal_page(message, state, appeals, 0, serial_data)
-    logger.info(f"История по серийному номеру {serial} показана пользователю @{message.from_user.username} (ID: {message.from_user.id})")
-
-async def show_appeal_page(message: Message, state: FSMContext, history: list, page: int, serial_data: dict):
-    appeal = history[page]
-    upload_date = serial_data['upload_date']
-    # Проверка на None для upload_date
-    if upload_date:
-        try:
-            upload_date_dt = datetime.strptime(upload_date, "%Y-%m-%dT%H:%M")
-            upload_date = upload_date_dt.strftime("%d.%m.%Y %H:%M")
-        except Exception as e:
-            logger.error(f"Ошибка форматирования upload_date: {e}")
-            upload_date = upload_date  # Оставляем как есть, если не удалось преобразовать
-    else:
-        upload_date = "Не указана"
-
-    taken_time = appeal['taken_time']
-    if taken_time:
-        try:
-            taken_time_dt = datetime.strptime(taken_time, "%Y-%m-%dT%H:%M")
-            taken_time = taken_time_dt.strftime("%d.%m.%Y %H:%M")
-        except Exception as e:
-            logger.error(f"Ошибка форматирования taken_time: {e}")
-            taken_time = taken_time
-    else:
-        taken_time = "Не указана"
-
-    new_serial_text = f"\nНовый серийник: {appeal.get('new_serial', '')}" if appeal.get('new_serial') else ""
-    response = (f"История по серийному номеру {appeal['serial']}:\n"
-                f"Дата загрузки: {upload_date}\n"
-                f"Количество обращений: {serial_data['appeal_count']}\n"
-                f"Статус возврата/брака: {serial_data['return_status'] or 'Не указан'}\n\n"
-                f"Заявка №{appeal['appeal_id']}:\n"
-                f"Дата: {taken_time}\n"
-                f"Статус: {appeal['status']}\n"
-                f"Админ: {appeal['username'] or 'Не назначен'}\n"
-                f"Описание: {appeal['description']}\n"
-                f"Ответ: {appeal['response'] or 'Нет ответа'}{new_serial_text}")
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton(text="⬅️ Предыдущая", callback_data=f"prev_page_{page - 1}"))
-    if page < len(history) - 1:
-        nav_buttons.append(InlineKeyboardButton(text="Следующая ➡️", callback_data=f"next_page_{page + 1}"))
-    if nav_buttons:
-        keyboard.inline_keyboard.append(nav_buttons)
-    keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
-    await message.answer(response, reply_markup=keyboard)
+    await state.update_data(page=0)
+    logger.info(f"Показана история серийного номера {serial} пользователю @{message.from_user.username} (ID: {message.from_user.id})")
 
 @router.callback_query(F.data.startswith("prev_page_") | F.data.startswith("next_page_"))
 async def navigate_appeal_page(callback: CallbackQuery, state: FSMContext, **data):

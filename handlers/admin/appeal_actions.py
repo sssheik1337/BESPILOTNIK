@@ -1,4 +1,4 @@
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -23,7 +23,7 @@ class AdminResponse(StatesGroup):
     delegate = State()
     open_appeals = State()
     my_appeals = State()
-    response_media = State()  # Добавлено для медиа
+    response_media = State()
 
 async def show_my_appeals_page(message: Message, state: FSMContext, appeals: list, page: int, total: int):
     start_idx = page * 10
@@ -73,37 +73,301 @@ async def process_response_prompt(callback: CallbackQuery, state: FSMContext, **
 async def process_response(message: Message, state: FSMContext, **data):
     db_pool = data.get("db_pool")
     user_id = message.from_user.id
+    username = message.from_user.username or "неизвестно"
     data_state = await state.get_data()
     appeal_id = data_state.get("appeal_id")
     media_files = data_state.get("media_files", [])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Прикрепить медиафайл", callback_data=f"add_response_media_{appeal_id}")],
+        [InlineKeyboardButton(text="Готово", callback_data=f"preview_response_{appeal_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"view_appeal_{appeal_id}")]
+    ])
+    if len(media_files) >= 10:
+        await message.answer("Достигнуто максимальное количество файлов (10). Нажмите 'Готово'.", reply_markup=keyboard)
+        logger.warning(f"Достигнуто максимальное количество файлов для @{username} (ID: {user_id})")
+        return
     if message.photo:
+        file_size = message.photo[-1].file_size / (1024 * 1024)  # в МБ
+        if file_size > 200:
+            await message.answer("Файл превышает 200 МБ. Приложите файл меньшего размера.", reply_markup=keyboard)
+            logger.warning(f"Файл превышает 200 МБ от @{username} (ID: {user_id})")
+            return
         media_files.append({"type": "photo", "file_id": message.photo[-1].file_id})
         await state.update_data(media_files=media_files)
-        await message.answer("Фото добавлено. Отправьте ещё медиа или текст ответа.")
+        try:
+            await message.delete()
+        except TelegramBadRequest as e:
+            logger.error(f"Ошибка удаления медиафайла от @{username} (ID: {user_id}): {str(e)}")
+        await message.answer(f"Медиа добавлено ({len(media_files)}/10). Прикрепите ещё или нажмите 'Готово':", reply_markup=keyboard)
+        logger.debug(f"Медиа (photo) добавлен пользователем @{username} (ID: {user_id})")
         return
     elif message.video:
+        file_size = message.video.file_size / (1024 * 1024)  # в МБ
+        if file_size > 200:
+            await message.answer("Файл превышает 200 МБ. Прикрепите файл меньшего размера.", reply_markup=keyboard)
+            logger.warning(f"Файл превышает 200 МБ от @{username} (ID: {user_id})")
+            return
         media_files.append({"type": "video", "file_id": message.video.file_id})
         await state.update_data(media_files=media_files)
-        await message.answer("Видео добавлено. Отправьте ещё медиа или текст ответа.")
+        try:
+            await message.delete()
+        except TelegramBadRequest as e:
+            logger.error(f"Ошибка удаления медиафайла от @{username} (ID: {user_id}): {str(e)}")
+        await message.answer(f"Медиа добавлено ({len(media_files)}/10). Прикрепите ещё или нажмите 'Готово':", reply_markup=keyboard)
+        logger.debug(f"Медиа (video) добавлен пользователем @{username} (ID: {user_id})")
         return
     elif message.video_note:
+        file_size = message.video_note.file_size / (1024 * 1024)  # в МБ
+        if file_size > 200:
+            await message.answer("Файл превышает 200 МБ. Прикрепите файл меньшего размера.", reply_markup=keyboard)
+            logger.warning(f"Файл превышает 200 МБ от @{username} (ID: {user_id})")
+            return
         media_files.append({"type": "video_note", "file_id": message.video_note.file_id})
         await state.update_data(media_files=media_files)
-        await message.answer("Кружок добавлен. Отправьте ещё медиа или текст ответа.")
+        try:
+            await message.delete()
+        except TelegramBadRequest as e:
+            logger.error(f"Ошибка удаления медиафайла от @{username} (ID: {user_id}): {str(e)}")
+        await message.answer(f"Медиа добавлено ({len(media_files)}/10). Прикрепите ещё или нажмите 'Готово':", reply_markup=keyboard)
+        logger.debug(f"Медиа (video_note) добавлен пользователем @{username} (ID: {user_id})")
         return
     elif message.text:
-        response = message.text
-        await save_response(appeal_id, response, json.dumps(media_files))
+        response = message.text.strip()
+        appeal = await get_appeal(appeal_id)
+        if not appeal:
+            await message.answer("Заявка не найдена.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+            ]))
+            logger.warning(f"Заявка №{appeal_id} не найдена пользователем @{username}")
+            await state.clear()
+            return
+        existing_response = appeal['response'] or ""
+        response_lines = existing_response.split('\n') if existing_response else []
+        new_response_line = f"[Администратор] {response}"
+        if new_response_line not in response_lines:
+            response_lines.append(new_response_line)
+        for media in media_files:
+            response_lines.append("[Медиа]")
+        new_response = '\n'.join(response_lines)
+        await save_response(appeal_id, new_response)
+        async with db_pool.acquire() as conn:
+            existing_media = json.loads(appeal['media_files'] or "[]")
+            existing_media.extend(media_files)
+            await conn.execute(
+                "UPDATE appeals SET media_files = $1, last_response_time = $2 WHERE appeal_id = $3",
+                json.dumps(existing_media), datetime.now().strftime("%Y-%m-%dT%H:%M"), appeal_id
+            )
         await message.answer("Ответ отправлен.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"view_appeal_{appeal_id}")]
         ]))
-        logger.info(f"Ответ по заявке №{appeal_id} отправлен пользователем @{message.from_user.username}")
+        try:
+            await message.delete()
+        except TelegramBadRequest as e:
+            logger.error(f"Ошибка удаления текстового ответа от @{username} (ID: {user_id}): {str(e)}")
+        logger.info(f"Ответ по заявке №{appeal_id} отправлен пользователем @{username}")
+        # Отправка уведомления пользователю
+        try:
+            for media in media_files:
+                if media.get("file_id"):
+                    if media["type"] == "photo":
+                        await message.bot.send_photo(
+                            chat_id=appeal["user_id"],
+                            photo=media["file_id"]
+                        )
+                    elif media["type"] in ["video", "video_note"]:
+                        await message.bot.send_video(
+                            chat_id=appeal["user_id"],
+                            video=media["file_id"]
+                        )
+            await message.bot.send_message(
+                chat_id=appeal["user_id"],
+                text=f"Получен ответ по вашей заявке №{appeal_id} от администратора @{username}:\n{response}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+                ])
+            )
+            logger.info(f"Уведомление об ответе по заявке №{appeal_id} отправлено пользователю ID {appeal['user_id']}")
+        except (TelegramBadRequest, TelegramForbiddenError) as e:
+            logger.error(f"Ошибка отправки уведомления пользователю ID {appeal['user_id']} для заявки №{appeal_id}: {str(e)}")
         await state.clear()
     else:
-        await message.answer("Отправьте текст или медиафайл.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"view_appeal_{appeal_id}")]
+        await message.answer("Отправьте текст или медиафайл.", reply_markup=keyboard)
+        logger.warning(f"Некорректный ввод для ответа на заявку №{appeal_id} от @{username}")
+
+@router.callback_query(F.data.startswith("add_response_media_"))
+async def add_response_media(callback: CallbackQuery, state: FSMContext):
+    appeal_id = int(callback.data.split("_")[-1])
+    user_id = callback.from_user.id
+    username = callback.from_user.username or "неизвестно"
+    data_state = await state.get_data()
+    media_files = data_state.get("media_files", [])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Готово", callback_data=f"preview_response_{appeal_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"view_appeal_{appeal_id}")]
+    ])
+    await callback.message.delete()
+    await callback.message.answer(f"Приложите фото, видео или кружочки (до 10 файлов, текущих: {len(media_files)}):", reply_markup=keyboard)
+    await state.set_state(AdminResponse.response)
+    logger.debug(f"Добавление медиа для ответа по заявке №{appeal_id} от @{username}")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("preview_response_"))
+async def preview_response(callback: CallbackQuery, state: FSMContext):
+    data_state = await state.get_data()
+    appeal_id = data_state["appeal_id"]
+    response_text = data_state.get("reply_text", "")
+    media_files = data_state.get("media_files", [])
+    text = f"Предпросмотр ответа:\nТекст: {response_text or 'Отсутствует'}\nМедиафайлы: {len(media_files)}"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Отправить", callback_data=f"submit_response_{appeal_id}")],
+        [InlineKeyboardButton(text="Редактировать", callback_data=f"edit_response_{appeal_id}")],
+        [InlineKeyboardButton(text="Отмена", callback_data=f"cancel_response_{appeal_id}")]
+    ])
+    await callback.message.delete()
+    await callback.message.answer(text, reply_markup=keyboard)
+    logger.debug(f"Предпросмотр ответа для заявки №{appeal_id} от @{callback.from_user.username}")
+
+@router.callback_query(F.data.startswith("edit_response_"))
+async def edit_response(callback: CallbackQuery, state: FSMContext):
+    appeal_id = int(callback.data.split("_")[-1])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Изменить текст", callback_data=f"change_response_text_{appeal_id}")],
+        [InlineKeyboardButton(text="Добавить медиа", callback_data=f"add_response_media_{appeal_id}")],
+        [InlineKeyboardButton(text="Отправить", callback_data=f"submit_response_{appeal_id}")],
+        [InlineKeyboardButton(text="Отмена", callback_data=f"cancel_response_{appeal_id}")]
+    ])
+    await callback.message.delete()
+    await callback.message.answer("Редактирование ответа:", reply_markup=keyboard)
+    logger.debug(f"Редактирование ответа для заявки №{appeal_id} от @{callback.from_user.username}")
+
+@router.callback_query(F.data.startswith("change_response_text_"))
+async def change_response_text(callback: CallbackQuery, state: FSMContext):
+    appeal_id = int(callback.data.split("_")[-1])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"edit_response_{appeal_id}")]
+    ])
+    await callback.message.delete()
+    await callback.message.answer("Введите новый текст ответа:", reply_markup=keyboard)
+    await state.set_state(AdminResponse.response)
+    logger.debug(f"Изменение текста ответа для заявки №{appeal_id} от @{callback.from_user.username}")
+
+@router.callback_query(F.data.startswith("cancel_response_"))
+async def cancel_response(callback: CallbackQuery, state: FSMContext):
+    appeal_id = int(callback.data.split("_")[-1])
+    await state.clear()
+    await callback.message.delete()
+    await callback.message.answer("Ответ отменён.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"view_appeal_{appeal_id}")]
+    ]))
+    logger.info(f"Ответ для заявки №{appeal_id} отменён пользователем @{callback.from_user.username}")
+
+@router.callback_query(F.data.startswith("submit_response_"))
+async def submit_response(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    user_id = callback.from_user.id
+    username = callback.from_user.username or "неизвестно"
+    data_state = await state.get_data()
+    appeal_id = data_state.get("appeal_id")
+    response_text = data_state.get("reply_text", "")
+    media_files = data_state.get("media_files", [])
+    appeal = await get_appeal(appeal_id)
+    if not appeal:
+        await callback.message.edit_text("Заявка не найдена.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
         ]))
-        logger.warning(f"Некорректный ввод для ответа на заявку №{appeal_id} от пользователя @{message.from_user.username}")
+        logger.warning(f"Заявка №{appeal_id} не найдена пользователем @{username}")
+        return
+    existing_response = appeal['response'] or ""
+    response_lines = existing_response.split('\n') if existing_response else []
+    if response_text:
+        new_response_line = f"[Администратор] {response_text}"
+        if new_response_line not in response_lines:
+            response_lines.append(new_response_line)
+    for media in media_files:
+        response_lines.append("[Медиа]")
+    new_response = '\n'.join(response_lines)
+    await save_response(appeal_id, new_response)
+    async with db_pool.acquire() as conn:
+        existing_media = json.loads(appeal['media_files'] or "[]")
+        existing_media.extend(media_files)
+        await conn.execute(
+            "UPDATE appeals SET media_files = $1, last_response_time = $2 WHERE appeal_id = $3",
+            json.dumps(existing_media), datetime.now().strftime("%Y-%m-%dT%H:%M"), appeal_id
+        )
+    await callback.message.edit_text("Ответ отправлен.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"view_appeal_{appeal_id}")]
+    ]))
+    logger.info(f"Ответ по заявке №{appeal_id} отправлен пользователем @{username}")
+    try:
+        for media in media_files:
+            if media.get("file_id"):
+                if media["type"] == "photo":
+                    await callback.message.bot.send_photo(
+                        chat_id=appeal["user_id"],
+                        photo=media["file_id"]
+                    )
+                elif media["type"] in ["video", "video_note"]:
+                    await callback.message.bot.send_video(
+                        chat_id=appeal["user_id"],
+                        video=media["file_id"]
+                    )
+        await callback.message.bot.send_message(
+            chat_id=appeal["user_id"],
+            text=f"Получен ответ по вашей заявке №{appeal_id} от администратора @{username}:\n{response_text}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+            ])
+        )
+        logger.info(f"Уведомление об ответе по заявке №{appeal_id} отправлено пользователю ID {appeal['user_id']}")
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
+        logger.error(f"Ошибка отправки уведомления пользователю ID {appeal['user_id']} для заявки №{appeal_id}: {str(e)}")
+    await state.clear()
+    await callback.answer()
+
+@router.message(StateFilter(AdminResponse.continue_dialogue))
+async def process_continue_dialogue(message: Message, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data")
+        await message.answer("Ошибка сервера. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+        ]))
+        return
+    data_state = await state.get_data()
+    appeal_id = data_state.get("appeal_id")
+    response_text = message.text.strip()
+    if not response_text:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"view_appeal_{appeal_id}")]
+        ])
+        await message.answer("Ответ не может быть пустым.", reply_markup=keyboard)
+        return
+    async with db_pool.acquire() as conn:
+        appeal = await conn.fetchrow("SELECT response, user_id FROM appeals WHERE appeal_id = $1", appeal_id)
+        existing_response = appeal['response'] or ""
+        # Удаляем дубликаты из существующего ответа
+        response_lines = existing_response.split('\n') if existing_response else []
+        new_response_line = f"[Администратор] {response_text}"
+        if new_response_line not in response_lines:
+            response_lines.append(new_response_line)
+        new_response = '\n'.join(response_lines)
+        await save_response(appeal_id, new_response)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Продолжить переписку", callback_data=f"continue_dialogue_{appeal_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+    ])
+    await message.answer("Ответ сохранён. Продолжить переписку или вернуться в главное меню?", reply_markup=keyboard)
+    try:
+        user_id = appeal['user_id']
+        await message.bot.send_message(
+            chat_id=user_id,
+            text=f"Вашей заявке №{appeal_id} добавлен ответ: {response_text}"
+        )
+        logger.info(f"Уведомление об ответе на заявку №{appeal_id} отправлено пользователю ID {user_id}")
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
+        logger.error(f"Ошибка отправки уведомления пользователю ID {user_id} для заявки №{appeal_id}: {str(e)}")
+    logger.info(f"Дополнительный ответ на заявку №{appeal_id} сохранён пользователем @{message.from_user.username}")
+    await state.clear()
 
 @router.callback_query(F.data.startswith("continue_dialogue_"))
 async def continue_dialogue_prompt(callback: CallbackQuery, state: FSMContext, **data):
@@ -327,7 +591,7 @@ async def view_appeal(callback: CallbackQuery, **data):
     logger.info(f"Заявка №{appeal_id} просмотрена пользователем @{callback.from_user.username}")
 
 @router.callback_query(F.data.startswith("take_appeal_"))
-async def take_appeal_action(callback: CallbackQuery, **data):
+async def take_appeal_prompt(callback: CallbackQuery, state: FSMContext, bot: Bot, **data):
     db_pool = data.get("db_pool")
     if not db_pool:
         logger.error("db_pool отсутствует в data")
@@ -336,46 +600,188 @@ async def take_appeal_action(callback: CallbackQuery, **data):
         ]))
         return
     appeal_id = int(callback.data.split("_")[-1])
+    user_id = callback.from_user.id
+    username = callback.from_user.username or "неизвестно"
     appeal = await get_appeal(appeal_id)
     if not appeal:
-        await callback.message.delete()
-        await callback.message.answer("Заявка не найдена.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        await callback.message.edit_text("Заявка не найдена.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
         ]))
-        logger.warning(f"Заявка №{appeal_id} не найдена пользователем @{callback.from_user.username}")
+        logger.warning(f"Заявка №{appeal_id} не найдена администратором @{username}")
         return
-    if appeal['status'] != 'new':
-        await callback.message.delete()
-        await callback.message.answer("Заявка уже взята в работу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-        ]))
-        logger.warning(f"Попытка взять заявку №{appeal_id} со статусом {appeal['status']} пользователем @{callback.from_user.username}")
-        return
+    # Проверяем, выполнено ли действие из канала
+    is_channel_action = False
     async with db_pool.acquire() as conn:
-        is_employee = await conn.fetchrow("SELECT admin_id FROM admins WHERE admin_id = $1", callback.from_user.id)
-    if callback.from_user.id not in MAIN_ADMIN_IDS and not is_employee:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-        ])
-        await callback.message.edit_text("Доступ запрещён.", reply_markup=keyboard)
-        logger.warning(f"Попытка взять заявку №{appeal_id} от неадминистратора @{callback.from_user.username}")
+        channels = await conn.fetch("SELECT channel_id FROM notification_channels")
+        channel_ids = [channel["channel_id"] for channel in channels]
+        if callback.message.chat.id in channel_ids:
+            is_channel_action = True
+    if appeal["status"] != "new":
+        await callback.message.edit_text("Заявка уже взята в работу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[]))
+        # Редактируем уведомления в канале только для действия из канала
+        if is_channel_action:
+            async with db_pool.acquire() as conn:
+                messages = await conn.fetch(
+                    "SELECT message_id, chat_id, topic_id FROM chat_messages JOIN notification_channels ON chat_id = channel_id WHERE sent_time = $1",
+                    f"appeal_id:{appeal_id}"
+                )
+                for msg in messages:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=msg["chat_id"],
+                            message_id=msg["message_id"],
+                            text=f"Заявка №{appeal_id} уже взята в работу.",
+                            reply_markup=None
+                        )
+                        logger.info(f"Уведомление в канале ID {msg['chat_id']} для заявки №{appeal_id} отредактировано")
+                    except (TelegramBadRequest, TelegramForbiddenError) as e:
+                        logger.error(f"Ошибка редактирования уведомления в канале ID {msg['chat_id']} для заявки №{appeal_id}: {str(e)}")
+        logger.warning(f"Заявка №{appeal_id} уже в статусе {appeal['status']} для @{username}")
         return
-    await take_appeal(appeal_id, callback.from_user.id, callback.from_user.username)
-    await callback.message.delete()
-    await callback.message.answer(f"Заявка №{appeal_id} взята в работу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    await take_appeal(appeal_id, user_id, username)
+    await callback.message.edit_text(f"Заявка №{appeal_id} взята в работу!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
     ]))
-    channels = await get_notification_channels()
-    for channel in channels:
-        try:
-            await callback.message.bot.send_message(
-                chat_id=channel['channel_id'],
-                message_thread_id=channel['topic_id'],
-                text=f"Заявка №{appeal_id} взята в работу @{callback.from_user.username}"
-            )  # Убрана кнопка "Взять в работу"
-        except (TelegramBadRequest, TelegramForbiddenError) as e:
-            logger.error(f"Ошибка отправки уведомления в канал {channel['channel_name']}: {str(e)}")
-    logger.info(f"Заявка №{appeal_id} взята в работу пользователем @{callback.from_user.username}")
+    logger.info(f"Заявка №{appeal_id} взята в работу администратором @{username} (ID: {user_id})")
+    # Отправка уведомления пользователю
+    try:
+        await bot.send_message(
+            chat_id=appeal["user_id"],
+            text=f"Ваша заявка №{appeal_id} взята в работу администратором @{username}.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+            ])
+        )
+        logger.info(f"Уведомление о взятии заявки №{appeal_id} отправлено пользователю ID {appeal['user_id']}")
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
+        logger.error(f"Ошибка отправки уведомления пользователю ID {appeal['user_id']} для заявки №{appeal_id}: {str(e)}")
+    # Редактируем уведомления в канале только для действия из канала
+    if is_channel_action:
+        async with db_pool.acquire() as conn:
+            messages = await conn.fetch(
+                "SELECT message_id, chat_id, topic_id FROM chat_messages JOIN notification_channels ON chat_id = channel_id WHERE sent_time = $1",
+                f"appeal_id:{appeal_id}"
+            )
+            for msg in messages:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=msg["chat_id"],
+                        message_id=msg["message_id"],
+                        text=f"Заявка №{appeal_id} взята в работу администратором @{username}.",
+                        reply_markup=None
+                    )
+                    logger.info(f"Уведомление в канале ID {msg['chat_id']} для заявки №{appeal_id} отредактировано")
+                except (TelegramBadRequest, TelegramForbiddenError) as e:
+                    logger.error(f"Ошибка редактирования уведомления в канале ID {msg['chat_id']} для заявки №{appeal_id}: {str(e)}")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("assign_to_"))
+async def assign_appeal(callback: CallbackQuery, state: FSMContext, bot: Bot, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data")
+        await callback.message.edit_text("Ошибка сервера. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+        ]))
+        return
+    parts = callback.data.split("_")
+    admin_id = int(parts[2])
+    appeal_id = int(parts[3])
+    user_id = callback.from_user.id
+    username = callback.from_user.username or "неизвестно"
+    appeal = await get_appeal(appeal_id)
+    if not appeal:
+        await callback.message.edit_text("Заявка не найдена.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+        ]))
+        logger.warning(f"Заявка №{appeal_id} не найдена администратором @{username}")
+        return
+    # Проверяем, выполнено ли действие из канала
+    is_channel_action = False
+    async with db_pool.acquire() as conn:
+        channels = await conn.fetch("SELECT channel_id FROM notification_channels")
+        channel_ids = [channel["channel_id"] for channel in channels]
+        if callback.message.chat.id in channel_ids:
+            is_channel_action = True
+    if appeal["status"] not in ["new", "in_progress"]:
+        await callback.message.edit_text("Заявка не может быть делегирована в текущем статусе.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[]))
+        # Редактируем уведомления в канале только для действия из канала
+        if is_channel_action:
+            async with db_pool.acquire() as conn:
+                messages = await conn.fetch(
+                    "SELECT message_id, chat_id, topic_id FROM chat_messages JOIN notification_channels ON chat_id = channel_id WHERE sent_time = $1",
+                    f"appeal_id:{appeal_id}"
+                )
+                for msg in messages:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=msg["chat_id"],
+                            message_id=msg["message_id"],
+                            text=f"Заявка №{appeal_id} уже взята в работу.",
+                            reply_markup=None
+                        )
+                        logger.info(f"Уведомление в канале ID {msg['chat_id']} для заявки №{appeal_id} отредактировано")
+                    except (TelegramBadRequest, TelegramForbiddenError) as e:
+                        logger.error(f"Ошибка редактирования уведомления в канале ID {msg['chat_id']} для заявки №{appeal_id}: {str(e)}")
+        logger.warning(f"Заявка №{appeal_id} в статусе {appeal['status']} не может быть делегирована для @{username}")
+        return
+    async with db_pool.acquire() as conn:
+        admin = await conn.fetchrow("SELECT username FROM admins WHERE admin_id = $1", admin_id)
+        if not admin:
+            await callback.message.edit_text("Администратор не найден.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+            ]))
+            logger.warning(f"Администратор ID {admin_id} не найден для делегирования заявки №{appeal_id}")
+            return
+        admin_username = admin["username"]
+    await delegate_appeal(appeal_id, admin_id, admin_username, current_admin_id=user_id)
+    await callback.message.edit_text(f"Заявка №{appeal_id} делегирована администратору @{admin_username}!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+    ]))
+    logger.info(f"Заявка №{appeal_id} делегирована администратору @{admin_username} (ID: {admin_id}) пользователем @{username}")
+    # Отправка уведомления пользователю
+    try:
+        await bot.send_message(
+            chat_id=appeal["user_id"],
+            text=f"Ваша заявка №{appeal_id} делегирована администратору @{admin_username}.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+            ])
+        )
+        logger.info(f"Уведомление о делегировании заявки №{appeal_id} отправлено пользователю ID {appeal['user_id']}")
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
+        logger.error(f"Ошибка отправки уведомления пользователю ID {appeal['user_id']} для заявки №{appeal_id}: {str(e)}")
+    # Отправка уведомления новому администратору
+    try:
+        await bot.send_message(
+            chat_id=admin_id,
+            text=f"Вам делегирована заявка №{appeal_id} от пользователя @{appeal['username']}.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Просмотреть заявку", callback_data=f"view_appeal_{appeal_id}")]
+            ])
+        )
+        logger.info(f"Уведомление о делегировании заявки №{appeal_id} отправлено администратору ID {admin_id}")
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
+        logger.error(f"Ошибка отправки уведомления администратору ID {admin_id} для заявки №{appeal_id}: {str(e)}")
+    # Редактируем уведомления в канале только для действия из канала
+    if is_channel_action:
+        async with db_pool.acquire() as conn:
+            messages = await conn.fetch(
+                "SELECT message_id, chat_id, topic_id FROM chat_messages JOIN notification_channels ON chat_id = channel_id WHERE sent_time = $1",
+                f"appeal_id:{appeal_id}"
+            )
+            for msg in messages:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=msg["chat_id"],
+                        message_id=msg["message_id"],
+                        text=f"Заявка №{appeal_id} делегирована администратору @{admin_username}.",
+                        reply_markup=None
+                    )
+                    logger.info(f"Уведомление в канале ID {msg['chat_id']} для заявки №{appeal_id} отредактировано")
+                except (TelegramBadRequest, TelegramForbiddenError) as e:
+                    logger.error(f"Ошибка редактирования уведомления в канале ID {msg['chat_id']} для заявки №{appeal_id}: {str(e)}")
+    await callback.answer()
 
 @router.callback_query(F.data.startswith("reply_appeal_"))
 async def reply_appeal_prompt(callback: CallbackQuery, state: FSMContext, **data):
@@ -407,12 +813,10 @@ async def reply_appeal_prompt(callback: CallbackQuery, state: FSMContext, **data
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"view_appeal_{appeal_id}")]
     ])
-    await callback.message.edit_text("Введите ваш ответ:", reply_markup=keyboard)
+    await callback.message.edit_text("Введите ответ по заявке или прикрепите медиа:", reply_markup=keyboard)
     await state.set_state(AdminResponse.response)
     await state.update_data(appeal_id=appeal_id)
     logger.debug(f"Запрос ответа на заявку №{appeal_id} от @{callback.from_user.username}")
-
-
 
 @router.callback_query(F.data.startswith("add_response_media_"))
 async def add_response_media_prompt(callback: CallbackQuery, state: FSMContext):
@@ -535,8 +939,6 @@ async def done_response_media(callback: CallbackQuery, state: FSMContext, **data
     logger.info(f"Медиа для ответа на заявку №{appeal_id} сохранены пользователем @{callback.from_user.username}")
     await state.clear()
 
-
-
 @router.callback_query(F.data.startswith("delegate_appeal_"))
 async def delegate_appeal_prompt(callback: CallbackQuery, state: FSMContext, **data):
     db_pool = data.get("db_pool")
@@ -568,39 +970,6 @@ async def delegate_appeal_prompt(callback: CallbackQuery, state: FSMContext, **d
     keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"view_appeal_{appeal_id}")])
     await callback.message.edit_text("Выберите сотрудника для делегирования:", reply_markup=keyboard)
     logger.debug(f"Запрос делегирования заявки №{appeal_id} от @{callback.from_user.username}")
-
-@router.callback_query(F.data.startswith("assign_to_"))
-async def assign_appeal(callback: CallbackQuery, **data):
-    db_pool = data.get("db_pool")
-    if not db_pool:
-        logger.error("db_pool отсутствует в data")
-        await callback.message.edit_text("Ошибка сервера. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-        ]))
-        return
-    parts = callback.data.split("_")
-    admin_id = int(parts[2])
-    appeal_id = int(parts[3])
-    async with db_pool.acquire() as conn:
-        new_admin_username = await conn.fetchval("SELECT username FROM admins WHERE admin_id = $1", admin_id) or "unknown"
-    await delegate_appeal(appeal_id, admin_id, new_admin_username)
-    await callback.message.delete()
-    await callback.message.answer(f"Заявка №{appeal_id} делегирована сотруднику @{new_admin_username}.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-    ]))
-    try:
-        await callback.message.bot.send_message(
-            chat_id=admin_id,
-            text=f"Вам делегирована заявка №{appeal_id}.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Просмотреть заявку", callback_data=f"view_appeal_{appeal_id}")]
-            ])
-        )
-        logger.info(f"Уведомление о делегировании заявки №{appeal_id} отправлено администратору ID {admin_id}")
-    except (TelegramBadRequest, TelegramForbiddenError) as e:
-        logger.error(f"Ошибка отправки уведомления администратору ID {admin_id} для заявки №{appeal_id}: {str(e)}")
-    logger.info(f"Заявка №{appeal_id} делегирована сотруднику ID {admin_id} пользователем @{callback.from_user.username}")
-    await callback.answer()
 
 @router.callback_query(F.data.startswith("await_specialist_"))
 async def await_specialist(callback: CallbackQuery, **data):

@@ -53,51 +53,60 @@ class SerialCheckMiddleware(BaseMiddleware):
         logger.debug(f"SerialCheckMiddleware: Текущее состояние FSM: {current_state}")
 
         is_admin = False
+        is_employee = False
         async with data["db_pool"].acquire() as conn:
             admin = await conn.fetchrow("SELECT admin_id FROM admins WHERE admin_id = $1", user_id)
             logger.debug(f"Проверка админа для ID {user_id}: {admin}")
             if admin or user_id in MAIN_ADMIN_IDS:
                 is_admin = True
+            employee = await conn.fetchrow("SELECT user_id FROM users WHERE user_id = $1", user_id)
+            logger.debug(f"Проверка сотрудника для ID {user_id}: {employee}")
+            if employee:
+                is_employee = True
 
-        if not is_admin:
-            is_confirm_auto_delete = isinstance(event, CallbackQuery) and event.data == "confirm_auto_delete"
-            is_start_command = isinstance(event, Message) and event.text and event.text.startswith("/start")
-            is_waiting_for_serial = current_state == "UserState:waiting_for_serial"
-            if is_start_command or is_confirm_auto_delete or is_waiting_for_serial:
-                logger.debug(f"Пропускаем {'/start' if is_start_command else 'confirm_auto_delete' if is_confirm_auto_delete else 'waiting_for_serial'} для пользователя @{username} (ID: {user_id})")
+        if is_admin or is_employee:
+            logger.debug(f"Пропускаем проверку serial для {'администратора' if is_admin else 'сотрудника'} @{username} (ID: {user_id})")
+            return await handler(update, data)
+
+        is_confirm_auto_delete = isinstance(event, CallbackQuery) and event.data == "confirm_auto_delete"
+        is_start_command = isinstance(event, Message) and event.text and event.text.startswith("/start")
+        is_waiting_for_serial = current_state == "UserState:waiting_for_serial"
+        if is_start_command or is_confirm_auto_delete or is_waiting_for_serial:
+            logger.debug(f"Пропускаем {'/start' if is_start_command else 'confirm_auto_delete' if is_confirm_auto_delete else 'waiting_for_serial'} для пользователя @{username} (ID: {user_id})")
+            return await handler(update, data)
+        if "serial" not in data_state:
+            logger.warning(f"Попытка доступа без серийного номера от пользователя @{username} (ID: {user_id})")
+            chat_id = event.chat.id if hasattr(event, 'chat') else (event.message.chat.id if hasattr(event, 'message') else None)
+            if chat_id is None:
+                logger.error("Не удалось определить chat_id для события")
                 return await handler(update, data)
-            if "serial" not in data_state:
-                logger.warning(f"Попытка доступа без серийного номера от пользователя @{username} (ID: {user_id})")
-                chat_id = event.chat.id if hasattr(event, 'chat') else (event.message.chat.id if hasattr(event, 'message') else None)
-                if chat_id is None:
-                    logger.error("Не удалось определить chat_id для события")
-                    return await handler(update, data)
-                try:
-                    media = [
-                        InputMediaPhoto(media=FSInputFile("/data/start1.jpg")),
-                        InputMediaPhoto(media=FSInputFile("/data/start2.jpg")),
-                        InputMediaPhoto(media=FSInputFile("/data/start3.jpg"))
-                    ]
-                    text = "Для безопасности включите автоудаление сообщений через сутки и введите серийный номер заново."
-                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="Я ВКЛЮЧИЛ АВТОУДАЛЕНИЕ", callback_data="confirm_auto_delete")]
-                    ])
-                    if isinstance(event, Message):
-                        logger.debug(f"Отправка сообщения об автоудалении для Message от @{username} (ID: {user_id})")
-                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
-                        await bot.send_media_group(chat_id=chat_id, media=media)
-                    elif isinstance(event, CallbackQuery):
-                        logger.debug(f"Отправка сообщения об автоудалении для CallbackQuery от @{username} (ID: {user_id})")
-                        await event.message.edit_text(text, reply_markup=keyboard)
-                        await bot.send_media_group(chat_id=chat_id, media=media)
-                    logger.debug(f"Сообщение об автоудалении отправлено для пользователя @{username} (ID: {user_id})")
-                except (TelegramBadRequest, TelegramForbiddenError, FileNotFoundError) as e:
-                    logger.error(f"Ошибка отправки сообщения об автоудалении для пользователя @{username} (ID: {user_id}): {str(e)}")
-                    if isinstance(event, Message):
-                        await bot.send_message(chat_id=chat_id, text="Ошибка. Попробуйте снова.")
-                    elif isinstance(event, CallbackQuery):
-                        await event.message.edit_text("Ошибка. Попробуйте снова.")
-                return
+            try:
+                media = [
+                    InputMediaPhoto(media=FSInputFile("/data/start1.jpg")),
+                    InputMediaPhoto(media=FSInputFile("/data/start2.jpg")),
+                    InputMediaPhoto(media=FSInputFile("/data/start3.jpg"))
+                ]
+                text = "⚠️В целях безопасности включите автоматическое удаление сообщений через сутки в настройках Telegram.\n"
+                "Инструкция в прикреплённых изображениях.⚠️"
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Я ВКЛЮЧИЛ АВТОУДАЛЕНИЕ", callback_data="confirm_auto_delete")]
+                ])
+                if isinstance(event, Message):
+                    logger.debug(f"Отправка сообщения об автоудалении для Message от @{username} (ID: {user_id})")
+                    await bot.send_media_group(chat_id=chat_id, media=media)  # Сначала отправляем медиа
+                    await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)  # Затем текст
+                elif isinstance(event, CallbackQuery):
+                    logger.debug(f"Отправка сообщения об автоудалении для CallbackQuery от @{username} (ID: {user_id})")
+                    await bot.send_media_group(chat_id=chat_id, media=media)  # Сначала отправляем медиа
+                    await event.message.edit_text(text, reply_markup=keyboard)  # Затем текст
+                logger.debug(f"Сообщение об автоудалении отправлено для пользователя @{username} (ID: {user_id})")
+            except (TelegramBadRequest, TelegramForbiddenError, FileNotFoundError) as e:
+                logger.error(f"Ошибка отправки сообщения об автоудалении для пользователя @{username} (ID: {user_id}): {str(e)}")
+                if isinstance(event, Message):
+                    await bot.send_message(chat_id=chat_id, text="Ошибка. Попробуйте снова.")
+                elif isinstance(event, CallbackQuery):
+                    await event.message.edit_text("Ошибка. Попробуйте снова.")
+            return
         logger.debug(f"Пользователь @{username} (ID: {user_id}) прошёл проверку, передаём управление хэндлеру")
         return await handler(update, data)
 
@@ -111,9 +120,9 @@ async def check_overdue_appeals(bot):
                 )
             for appeal in appeals:
                 last_response_time = datetime.strptime(appeal['last_response_time'], "%Y-%m-%dT%H:%M")
-                if datetime.now() - last_response_time > timedelta(minutes=5):  # Для теста
+                if datetime.now() - last_response_time > timedelta(hours=48):  # Продакшн: 48 часов
                     await close_appeal(appeal['appeal_id'])
-                    text = f"Заявка №{appeal['appeal_id']} автоматически закрыта из-за отсутствия ответа в течение 5 минут."
+                    text = f"Заявка №{appeal['appeal_id']} автоматически закрыта из-за отсутствия ответа в течение 48 часов."
                     try:
                         await bot.send_message(
                             chat_id=appeal['user_id'],
@@ -138,22 +147,23 @@ async def check_overdue_appeals(bot):
                         except Exception as e:
                             logger.error(f"Ошибка отправки уведомления админу ID {appeal['admin_id']} для заявки №{appeal['appeal_id']}: {e}")
                     for main_admin_id in MAIN_ADMIN_IDS:
-                        try:
-                            await bot.send_message(
-                                chat_id=main_admin_id,
-                                text=text,
-                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-                                ])
-                            )
-                            logger.info(f"Уведомление о закрытии заявки №{appeal['appeal_id']} отправлено главному админу ID {main_admin_id}")
-                        except Exception as e:
-                            logger.error(f"Ошибка отправки уведомления главному админу ID {main_admin_id} для заявки №{appeal['appeal_id']}: {e}")
+                        if not appeal['admin_id'] or main_admin_id != appeal['admin_id']:  # Исключаем дублирование
+                            try:
+                                await bot.send_message(
+                                    chat_id=main_admin_id,
+                                    text=text,
+                                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+                                    ])
+                                )
+                                logger.info(f"Уведомление о закрытии заявки №{appeal['appeal_id']} отправлено главному админу ID {main_admin_id}")
+                            except Exception as e:
+                                logger.error(f"Ошибка отправки уведомления главному админу ID {main_admin_id} для заявки №{appeal['appeal_id']}: {e}")
                     logger.info(f"Заявка №{appeal['appeal_id']} автоматически закрыта")
-            await asyncio.sleep(60)  # Проверка каждую минуту
+            await asyncio.sleep(3600)  # Проверка каждый час
         except Exception as e:
             logger.error(f"Ошибка в шедулере просроченных заявок: {e}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(3600)
 
 async def main():
     bot = Bot(token=TOKEN)

@@ -29,7 +29,7 @@ async def show_closed_appeals(callback: CallbackQuery, **data):
     db_pool = data.get("db_pool")
     if not db_pool:
         logger.error("db_pool отсутствует в data")
-        await callback.message.answer("Ошибка сервера. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        await callback.message.edit_text("Ошибка сервера. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
         ]))
         return
@@ -37,7 +37,7 @@ async def show_closed_appeals(callback: CallbackQuery, **data):
     keyboard = await get_closed_appeals_menu(appeals)
     if not appeals:
         keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
-        await callback.message.answer("Нет закрытых заявок.", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+        await callback.message.edit_text("Нет закрытых заявок.", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
         logger.info(f"Нет закрытых заявок для пользователя @{callback.from_user.username}")
         return
     nav_buttons = []

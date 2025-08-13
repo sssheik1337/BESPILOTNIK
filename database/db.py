@@ -48,8 +48,30 @@ async def initialize_db():
         logger.error(f"Ошибка подключения к базе данных PostgreSQL: {e}")
         raise
 
+async def get_db_pool():
+    global pool
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+    return pool
+
+async def close_db():
+    global pool
+    if pool:
+        await pool.close()
+        logger.info("Пул соединений к базе данных закрыт")
+        pool = None
+
 async def create_tables():
     async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS serials (
+                serial TEXT PRIMARY KEY,
+                upload_date TEXT,
+                appeal_count INTEGER DEFAULT 0,
+                status TEXT,
+                return_status TEXT
+            )
+        """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS appeals (
                 appeal_id SERIAL PRIMARY KEY,
@@ -63,28 +85,45 @@ async def create_tables():
                 created_time TEXT,
                 taken_time TEXT,
                 closed_time TEXT,
-                last_response_time TEXT
+                response TEXT,
+                new_serial TEXT,
+                last_response_time TEXT,
+                FOREIGN KEY (serial) REFERENCES serials (serial)
             )
         """)
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS serials (
-                serial TEXT PRIMARY KEY,
-                return_status TEXT
+            CREATE TABLE IF NOT EXISTS admins (
+                admin_id BIGINT PRIMARY KEY,
+                username TEXT,
+                appeals_taken INTEGER DEFAULT 0,
+                is_main_admin BOOLEAN DEFAULT FALSE
             )
         """)
-        await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS admins (
-                        admin_id BIGINT PRIMARY KEY,
-                        username TEXT,
-                        appeals_taken INTEGER DEFAULT 0,
-                        is_main_admin BOOLEAN DEFAULT FALSE
-                    )
-                """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS notification_channels (
                 channel_id BIGINT PRIMARY KEY,
                 channel_name TEXT,
-                topic_id BIGINT
+                topic_id INTEGER
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                serial TEXT,
+                FOREIGN KEY (serial) REFERENCES serials (serial)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS defect_reports (
+                report_id SERIAL PRIMARY KEY,
+                serial TEXT,
+                report_date TEXT,
+                report_time TEXT,
+                location TEXT,
+                employee_id BIGINT,
+                media_links TEXT,
+                FOREIGN KEY (serial) REFERENCES serials (serial),
+                FOREIGN KEY (employee_id) REFERENCES admins (admin_id)
             )
         """)
         await conn.execute("""
@@ -96,35 +135,19 @@ async def create_tables():
                 callsign TEXT,
                 specialty TEXT,
                 contact TEXT,
-                video_links TEXT,
+                video_link TEXT,
                 photo_links TEXT
             )
         """)
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS defect_reports (
-                report_id SERIAL PRIMARY KEY,
-                serial TEXT,
-                report_date TEXT,
-                report_time TEXT,
-                location TEXT,
-                media_links TEXT,
-                employee_id BIGINT
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                message_id BIGINT,
+                chat_id BIGINT,
+                sent_time TEXT,
+                PRIMARY KEY (message_id, chat_id)
             )
         """)
-        logger.info("Таблицы базы данных созданы или проверены")
-
-async def get_db_pool():
-    global pool
-    if pool is None:
-        raise RuntimeError("Database pool is not initialized")
-    return pool
-
-async def close_db():
-    global pool
-    if pool:
-        await pool.close()
-        logger.info("Пул соединений к базе данных закрыт")
-        pool = None
+    logger.info("Таблицы базы данных созданы или проверены")
 
 async def add_serial(serial):
     async with pool.acquire() as conn:
@@ -182,11 +205,16 @@ async def get_appeal(appeal_id):
 
 async def take_appeal(appeal_id, admin_id, username):
     async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE appeals SET admin_id = $1, username = $2, status = 'in_progress', taken_time = $3 WHERE appeal_id = $4",
-            admin_id, username, datetime.now().strftime("%Y-%m-%dT%H:%M"), appeal_id
-        )
-        logger.info(f"Заявка №{appeal_id} взята в работу администратором ID {admin_id}")
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE appeals SET admin_id = $1, username = $2, status = 'in_progress', taken_time = $3 WHERE appeal_id = $4",
+                admin_id, username, datetime.now().strftime("%Y-%m-%dT%H:%M"), appeal_id
+            )
+            await conn.execute(
+                "UPDATE admins SET appeals_taken = appeals_taken + 1 WHERE admin_id = $1",
+                admin_id
+            )
+            logger.info(f"Заявка №{appeal_id} взята в работу администратором ID {admin_id}")
 
 async def postpone_appeal(appeal_id, new_time):
     async with pool.acquire() as conn:
@@ -213,13 +241,28 @@ async def close_appeal(appeal_id):
         )
         logger.info(f"Заявка №{appeal_id} закрыта")
 
-async def delegate_appeal(appeal_id, new_admin_id, new_admin_username):
+async def delegate_appeal(appeal_id, admin_id, username, current_admin_id=None):
     async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE appeals SET admin_id = $1, last_response_time = $2 WHERE appeal_id = $3",
-            new_admin_id, datetime.now().strftime("%Y-%m-%dT%H:%M"), appeal_id
-        )
-        logger.info(f"Заявка №{appeal_id} делегирована админу @{new_admin_username} (ID: {new_admin_id})")
+        async with conn.transaction():
+            # Проверяем, был ли текущий администратор назначен на заявку
+            if current_admin_id:
+                appeal = await conn.fetchrow("SELECT admin_id FROM appeals WHERE appeal_id = $1", appeal_id)
+                if appeal and appeal["admin_id"] == current_admin_id:
+                    await conn.execute(
+                        "UPDATE admins SET appeals_taken = appeals_taken - 1 WHERE admin_id = $1 AND appeals_taken > 0",
+                        current_admin_id
+                    )
+                    logger.info(f"Уменьшено appeals_taken для администратора ID {current_admin_id} для заявки №{appeal_id}")
+            # Обновляем заявку и увеличиваем appeals_taken для нового администратора
+            await conn.execute(
+                "UPDATE appeals SET admin_id = $1, username = $2, status = 'in_progress', taken_time = $3 WHERE appeal_id = $4",
+                admin_id, username, datetime.now().strftime("%Y-%m-%dT%H:%M"), appeal_id
+            )
+            await conn.execute(
+                "UPDATE admins SET appeals_taken = appeals_taken + 1 WHERE admin_id = $1",
+                admin_id
+            )
+            logger.info(f"Заявка №{appeal_id} делегирована администратору ID {admin_id}")
 
 async def get_open_appeals(page=0, limit=10):
     offset = page * limit

@@ -13,6 +13,7 @@ from io import BytesIO
 import pandas as pd
 import json
 from utils.validators import validate_media
+from utils.statuses import APPEAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,8 @@ async def exam_menu_prompt(callback: CallbackQuery, **data):
     logger.info(f"Открыто меню экзаменов пользователем @{callback.from_user.username}")
     await callback.answer()
 
+
+
 @router.callback_query(F.data == "stats")
 async def show_stats(callback: CallbackQuery, **data):
     db_pool = data.get("db_pool")
@@ -78,7 +81,8 @@ async def show_stats(callback: CallbackQuery, **data):
         return
     response = "Статистика заявок:\n"
     for count in status_counts:
-        response += f"{count['status']}: {count['total']}\n"
+        status_display = APPEAL_STATUSES.get(count['status'], count['status'])  # Используем словарь для перевода
+        response += f"{status_display}: {count['total']}\n"
     response += "\nСтатистика сотрудников:\n"
     for admin in admin_stats:
         response += f"@{admin['username']}: {admin['appeals_taken']} заявок\n"
