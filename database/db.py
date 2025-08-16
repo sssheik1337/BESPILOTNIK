@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import json
 from config import DB_CONFIG
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,7 @@ def get_my_appeals_menu(appeals, page, total_appeals):
             )
         ])
     nav_buttons = []
-    if total_appeals > 10:  # Показываем кнопки только если заявок больше 10
+    if total_appeals > 10:
         if page > 0:
             nav_buttons.append(InlineKeyboardButton(text="⬅️ Предыдущая", callback_data=f"my_appeals_page_{page-1}"))
         if (page + 1) * 10 < total_appeals:
@@ -47,19 +48,6 @@ async def initialize_db():
     except Exception as e:
         logger.error(f"Ошибка подключения к базе данных PostgreSQL: {e}")
         raise
-
-async def get_db_pool():
-    global pool
-    if pool is None:
-        raise RuntimeError("Database pool is not initialized")
-    return pool
-
-async def close_db():
-    global pool
-    if pool:
-        await pool.close()
-        logger.info("Пул соединений к базе данных закрыт")
-        pool = None
 
 async def create_tables():
     async with pool.acquire() as conn:
@@ -135,8 +123,17 @@ async def create_tables():
                 callsign TEXT,
                 specialty TEXT,
                 contact TEXT,
+                personal_number TEXT,
                 video_link TEXT,
                 photo_links TEXT
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS training_centers (
+                id SERIAL PRIMARY KEY,
+                code_word TEXT UNIQUE,
+                center_name TEXT,
+                chat_link TEXT
             )
         """)
         await conn.execute("""
@@ -148,6 +145,115 @@ async def create_tables():
             )
         """)
     logger.info("Таблицы базы данных созданы или проверены")
+
+async def get_db_pool():
+    global pool
+    if pool is None:
+        raise RuntimeError("Database pool not initialized")
+    return pool
+
+async def add_exam_record(fio, subdivision, military_unit, callsign, specialty, contact, personal_number, video_link=None, photo_links=None):
+    async with pool.acquire() as conn:
+        exam_id = await conn.fetchval(
+            "INSERT INTO exam_records (fio, subdivision, military_unit, callsign, specialty, contact, personal_number, video_link, photo_links) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING exam_id",
+            fio, subdivision, military_unit, callsign, specialty, contact, personal_number, video_link, json.dumps(photo_links) if photo_links else None
+        )
+        logger.info(f"Экзамен №{exam_id} добавлен для {fio}")
+        return exam_id
+
+async def update_exam_record(exam_id, video_link, photo_links):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE exam_records SET video_link = $1, photo_links = $2 WHERE exam_id = $3",
+            video_link, json.dumps(photo_links) if photo_links else None, exam_id
+        )
+        logger.info(f"Экзамен №{exam_id} обновлён с видео и фото")
+
+async def get_exam_records():
+    async with pool.acquire() as conn:
+        records = await conn.fetch("SELECT * FROM exam_records ORDER BY exam_id DESC")
+        logger.info(f"Запрошены записи экзаменов, найдено: {len(records)}")
+        return records
+
+async def validate_exam_record(fio, personal_number, military_unit, subdivision, specialty, contact):
+    def normalize_string(s):
+        if not s:
+            return ""
+        # Удаляем пробелы, дефисы и приводим к нижнему регистру
+        return re.sub(r'\s+|-', '', s.lower())
+
+    async with pool.acquire() as conn:
+        records = await conn.fetch("SELECT * FROM exam_records")
+        for record in records:
+            # Проверяем совпадение с нормализацией
+            if (normalize_string(record['fio']) == normalize_string(fio) or
+                normalize_string(record['personal_number']) == normalize_string(personal_number) or
+                normalize_string(record['military_unit']) == normalize_string(military_unit) or
+                normalize_string(record['subdivision']) == normalize_string(subdivision) or
+                normalize_string(record['specialty']) == normalize_string(specialty) or
+                normalize_string(record['contact']) == normalize_string(contact)):
+                return record['exam_id']
+        return None
+
+async def get_training_centers():
+    async with pool.acquire() as conn:
+        centers = await conn.fetch("SELECT id, center_name, chat_link FROM training_centers WHERE center_name IS NOT NULL")
+        logger.info(f"Запрошены УТЦ, найдено: {len(centers)}")
+        return centers
+
+async def get_code_word():
+    async with pool.acquire() as conn:
+        code_word = await conn.fetchval("SELECT code_word FROM training_centers WHERE code_word IS NOT NULL LIMIT 1")
+        logger.debug(f"Запрошено кодовое слово: {code_word}")
+        return code_word
+
+async def set_code_word(code_word):
+    async with pool.acquire() as conn:
+        # Проверяем, существует ли запись с code_word
+        existing = await conn.fetchrow("SELECT id FROM training_centers WHERE code_word IS NOT NULL LIMIT 1")
+        if existing:
+            await conn.execute("UPDATE training_centers SET code_word = $1 WHERE id = $2", code_word, existing["id"])
+        else:
+            await conn.execute("INSERT INTO training_centers (code_word) VALUES ($1)", code_word)
+        logger.info(f"Кодовое слово установлено: {code_word}")
+
+async def add_training_center(center_name, chat_link):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO training_centers (center_name, chat_link) VALUES ($1, $2)",
+            center_name, chat_link
+        )
+        logger.info(f"Добавлен УТЦ: {center_name}")
+
+async def update_training_center(center_id, chat_link):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE training_centers SET chat_link = $1 WHERE id = $2",
+            chat_link, center_id
+        )
+        logger.info(f"Обновлена ссылка для УТЦ ID {center_id}")
+
+async def get_serial_history(serial):
+    async with pool.acquire() as conn:
+        serial_data = await conn.fetchrow(
+            "SELECT * FROM serials WHERE serial = $1", serial
+        )
+        if not serial_data:
+            logger.warning(f"Серийный номер {serial} не найден в базе")
+            return None, []
+        appeals = await conn.fetch(
+            "SELECT * FROM appeals WHERE serial = $1 ORDER BY created_time DESC", serial
+        )
+        logger.info(f"Запрошена история серийного номера {serial}, найдено заявок: {len(appeals)}")
+        return serial_data, appeals
+
+async def close_db():
+    global pool
+    if pool:
+        await pool.close()
+        logger.info("Пул соединений к базе данных закрыт")
+        pool = None
 
 async def add_serial(serial):
     async with pool.acquire() as conn:
@@ -409,33 +515,3 @@ async def get_defect_reports(serial=None, serial_from=None, serial_to=None):
             reports = await conn.fetch("SELECT * FROM defect_reports ORDER BY report_date DESC")
         logger.info(f"Запрошены отчёты о неисправности, найдено: {len(reports)}")
         return reports
-
-async def add_exam_record(fio, subdivision, military_unit, callsign, specialty, contact, video_link, photo_links):
-    async with pool.acquire() as conn:
-        exam_id = await conn.fetchval(
-            "INSERT INTO exam_records (fio, subdivision, military_unit, callsign, specialty, contact, video_link, photo_links) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING exam_id",
-            fio, subdivision, military_unit, callsign, specialty, contact, video_link, json.dumps(photo_links)
-        )
-        logger.info(f"Экзамен №{exam_id} добавлен для {fio}")
-        return exam_id
-
-async def get_exam_records():
-    async with pool.acquire() as conn:
-        records = await conn.fetch("SELECT * FROM exam_records ORDER BY exam_id DESC")
-        logger.info(f"Запрошены записи экзаменов, найдено: {len(records)}")
-        return records
-
-async def get_serial_history(serial):
-    async with pool.acquire() as conn:
-        serial_data = await conn.fetchrow(
-            "SELECT * FROM serials WHERE serial = $1", serial
-        )
-        if not serial_data:
-            logger.warning(f"Серийный номер {serial} не найден в базе")
-            return None, []
-        appeals = await conn.fetch(
-            "SELECT * FROM appeals WHERE serial = $1 ORDER BY created_time DESC", serial
-        )
-        logger.info(f"Запрошена история серийного номера {serial}, найдено заявок: {len(appeals)}")
-        return serial_data, appeals

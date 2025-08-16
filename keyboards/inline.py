@@ -141,15 +141,18 @@ def get_admin_panel_menu():
         [InlineKeyboardButton(text="📢 Добавить канал/группу", callback_data="add_channel")],
         [InlineKeyboardButton(text="🗑 Удалить канал/группу", callback_data="remove_channel")],
         [InlineKeyboardButton(text="✏️ Изменить канал/группу", callback_data="edit_channel")],
+        [InlineKeyboardButton(text="🔑 Изменить кодовое слово", callback_data="change_code_word")],
+        [InlineKeyboardButton(text="🏫 Редактировать УТЦ", callback_data="manage_training_centers")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
     ])
 
 def get_remove_channel_menu(channels):
     keyboard = []
     for channel in channels:
+        topic_part = f"/{channel['topic_id']}" if channel['topic_id'] else ""
         keyboard.append([
             InlineKeyboardButton(
-                text=f"{channel['channel_name']}{f'/{channel['topic_id']}' if channel['topic_id'] else ''}",
+                text=f"{channel['channel_name']}{topic_part}",
                 callback_data=f"remove_channel_{channel['channel_id']}"
             )
         ])
@@ -160,14 +163,25 @@ def get_remove_channel_menu(channels):
 def get_edit_channel_menu(channels):
     keyboard = []
     for channel in channels:
+        topic_part = f"/{channel['topic_id']}" if channel['topic_id'] else ""
         keyboard.append([
             InlineKeyboardButton(
-                text=f"{channel['channel_name']}{f'/{channel['topic_id']}' if channel['topic_id'] else ''}",
+                text=f"{channel['channel_name']}{topic_part}",
                 callback_data=f"edit_channel_{channel['channel_id']}"
             )
         ])
     keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
     logger.debug(f"Создана клавиатура для редактирования каналов с {len(channels)} каналами")
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def get_training_centers_menu(centers):
+    keyboard = []
+    for center in centers:
+        if center["center_name"]:  # Проверяем, что center_name не None
+            keyboard.append([InlineKeyboardButton(text=center["center_name"], callback_data=f"edit_center_{center['id']}")])
+    keyboard.append([InlineKeyboardButton(text="Добавить УТЦ", callback_data="add_training_center")])
+    keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")])
+    logger.debug(f"Создана клавиатура для управления УТЦ с {len(centers)} центрами")
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_overdue_menu(appeal_id):

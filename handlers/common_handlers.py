@@ -21,7 +21,7 @@ class UserState(StatesGroup):
     waiting_for_serial = State()
     menu = State()
 
-async def clear_serial_state(user_id, state: FSMContext, delay=12*3600):  # 12 часов
+async def clear_serial_state(user_id, state: FSMContext, delay=12*3600):
     await asyncio.sleep(delay)
     current_state = await state.get_state()
     if current_state:
@@ -46,21 +46,19 @@ async def start_command(message: Message, state: FSMContext, bot: Bot, **data):
         logger.debug(f"Результат запроса users для ID {user_id}: {employee}")
         if employee:
             is_employee = True
-
+    await state.clear()
     if is_admin:
-        logger.debug(f"Пользователь @{username} (ID: {user_id}) определён как администратор")
         await message.answer("Добро пожаловать, администратор!", reply_markup=get_admin_menu(user_id))
+        logger.debug(f"Пользователь @{username} (ID: {user_id}) определён как администратор")
         logger.debug(f"Пользователь @{username} (ID: {user_id}) получил админское меню")
-        await state.clear()
     elif is_employee:
-        logger.debug(f"Пользователь @{username} (ID: {user_id}) определён как сотрудник")
-        serial_data = await conn.fetchrow("SELECT serial FROM users WHERE user_id = $1", user_id)
-        await state.update_data(serial=serial_data["serial"])
+        serial = employee["serial"]
+        await state.update_data(serial=serial)
         await state.set_state(UserState.menu)
         await message.answer("Добро пожаловать!", reply_markup=get_user_menu())
+        logger.debug(f"Пользователь @{username} (ID: {user_id}) определён как сотрудник")
         logger.debug(f"Пользователь @{username} (ID: {user_id}) получил пользовательское меню")
     else:
-        logger.debug(f"Пользователь @{username} (ID: {user_id}) не администратор и не сотрудник, установка состояния waiting_for_auto_delete")
         await state.set_state(UserState.waiting_for_auto_delete)
         try:
             media = [
@@ -68,8 +66,7 @@ async def start_command(message: Message, state: FSMContext, bot: Bot, **data):
                 InputMediaPhoto(media=FSInputFile("/data/start2.jpg")),
                 InputMediaPhoto(media=FSInputFile("/data/start3.jpg"))
             ]
-            logger.debug(f"Отправка приветственного сообщения для пользователя @{username} (ID: {user_id})")
-            await message.answer_media_group(media=media)
+            await bot.send_media_group(chat_id=message.chat.id, media=media)
             await message.answer(
                 "⚠️В целях безопасности включите автоматическое удаление сообщений через сутки в настройках Telegram.\n"
                 "Инструкция в прикреплённых изображениях.⚠️",
@@ -77,64 +74,83 @@ async def start_command(message: Message, state: FSMContext, bot: Bot, **data):
                     [InlineKeyboardButton(text="Я ВКЛЮЧИЛ АВТОУДАЛЕНИЕ", callback_data="confirm_auto_delete")]
                 ])
             )
-            logger.debug(f"Пользователь @{username} (ID: {user_id}) получил запрос на автоудаление")
+            logger.debug(f"Пользователь @{username} (ID: {user_id}) перенаправлен на запрос автоудаления")
         except (TelegramBadRequest, TelegramForbiddenError, FileNotFoundError) as e:
-            logger.error(f"Ошибка отправки приветственного сообщения для пользователя @{username} (ID: {user_id}): {str(e)}")
-            await message.answer("Ошибка загрузки инструкции. Убедитесь, что файлы инструкции доступны, и попробуйте снова.")
+            logger.error(f"Ошибка при запросе автоудаления для пользователя @{username} (ID: {user_id}): {str(e)}")
+            await message.answer("Ошибка. Попробуйте снова.")
 
 @router.callback_query(F.data == "confirm_auto_delete")
-async def confirm_auto_delete(callback: CallbackQuery, state: FSMContext, bot: Bot):
+async def confirm_auto_delete(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     username = callback.from_user.username or "неизвестно"
     logger.debug(f"Обработка confirm_auto_delete для пользователя @{username} (ID: {user_id})")
-    await state.set_state(UserState.waiting_for_serial)
-    try:
-        await callback.message.delete()
-    except TelegramBadRequest as e:
-        logger.error(f"Ошибка удаления сообщения для пользователя @{username} (ID: {user_id}): {str(e)}")
-    await callback.message.answer("Введите серийный номер:")
-    logger.debug(f"Пользователь @{username} (ID: {user_id}) подтвердил автоудаление и запрошен серийный номер")
+    await callback.message.delete()
+    await callback.message.answer(
+        "Выберите действие:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Запрос тех.поддержки", callback_data="request_support")],
+            [InlineKeyboardButton(text="Запись на обучение", callback_data="enroll_training")]
+        ])
+    )
+    await state.set_state(None)
+    logger.debug(f"Пользователь @{username} (ID: {user_id}) подтвердил автоудаление и запрошен выбор сценария")
     await callback.answer()
-    asyncio.create_task(clear_serial_state(user_id, state))  # 12 часов (по умолчанию)
+
+@router.callback_query(F.data == "request_support")
+async def request_support(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    username = callback.from_user.username or "неизвестно"
+    await callback.message.edit_text("Введите серийный номер:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
+    ]))
+    await state.set_state(UserState.waiting_for_serial)
+    logger.debug(f"Пользователь @{username} (ID: {user_id}) выбрал запрос техподдержки")
+    await callback.answer()
+
+@router.callback_query(F.data == "select_scenario")
+async def select_scenario(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "Выберите действие:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Запрос тех.поддержки", callback_data="request_support")],
+            [InlineKeyboardButton(text="Запись на обучение", callback_data="enroll_training")]
+        ])
+    )
+    await state.set_state(None)
+    logger.debug(f"Пользователь @{callback.from_user.username} (ID: {callback.from_user.id}) вернулся к выбору сценария")
+    await callback.answer()
 
 @router.message(StateFilter(UserState.waiting_for_serial))
-async def process_serial(message: Message, state: FSMContext, bot: Bot, **data):
+async def process_serial(message: Message, state: FSMContext, **data):
     user_id = message.from_user.id
     username = message.from_user.username or "неизвестно"
+    logger.debug(f"Обработка серийного номера {message.text} от пользователя @{username} (ID: {user_id})")
+    db_pool = data["db_pool"]
     serial = message.text.strip()
-    logger.debug(f"Обработка серийного номера {serial} от пользователя @{username} (ID: {user_id})")
-
-    # Валидация формата серийного номера
     if not validate_serial(serial):
-        await message.answer("Неверный формат серийного номера. Он должен содержать от 6 до 20 букв и цифр. Попробуйте снова:")
-        logger.warning(f"Неверный формат серийного номера {serial} от пользователя @{username}")
-        try:
-            await message.delete()
-        except TelegramBadRequest as e:
-            logger.error(f"Ошибка удаления сообщения с серийным номером для пользователя @{username} (ID: {user_id}): {str(e)}")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
+        ])
+        await message.answer("Некорректный серийный номер. Введите заново:", reply_markup=keyboard)
+        logger.warning(f"Некорректный серийный номер {serial} от @{username} (ID: {user_id})")
         return
-
-    # Проверка существования серийного номера в базе
-    serial_data, _ = await get_serial_history(serial)
+    serial_data, appeals = await get_serial_history(serial)
     if not serial_data:
-        await message.answer("Серийный номер не найден в базе. Пожалуйста, введите существующий серийный номер:")
-        logger.warning(f"Серийный номер {serial} не найден в базе для пользователя @{username}")
-        try:
-            await message.delete()
-        except TelegramBadRequest as e:
-            logger.error(f"Ошибка удаления сообщения с серийным номером для пользователя @{username} (ID: {user_id}): {str(e)}")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
+        ])
+        await message.answer(f"Серийный номер {serial} не найден.", reply_markup=keyboard)
+        logger.warning(f"Серийный номер {serial} не найден для @{username}")
         return
-
-    # Успешная валидация и проверка
     await state.update_data(serial=serial)
     await state.set_state(UserState.menu)
-    await message.answer("Добро пожаловать!", reply_markup=get_user_menu())
-    logger.info(f"Серийный номер {serial} сохранён в состоянии для пользователя ID {user_id}")
-    asyncio.create_task(clear_serial_state(user_id, state))  # 12 часов (по умолчанию)
     try:
         await message.delete()
     except TelegramBadRequest as e:
-        logger.error(f"Ошибка удаления сообщения с серийным номером для пользователя @{username} (ID: {user_id}): {str(e)}")
+        logger.error(f"Ошибка удаления сообщения от @{username} (ID: {user_id}): {str(e)}")
+    await message.answer("Добро пожаловать!", reply_markup=get_user_menu())
+    logger.info(f"Серийный номер {serial} сохранён в состоянии для пользователя ID {user_id}")
+    asyncio.create_task(clear_serial_state(user_id, state))
 
 @router.callback_query(F.data == "main_menu")
 async def return_to_main_menu(callback: CallbackQuery, state: FSMContext, bot: Bot, **data):
@@ -153,12 +169,10 @@ async def return_to_main_menu(callback: CallbackQuery, state: FSMContext, bot: B
         logger.debug(f"Результат запроса users для ID {user_id}: {employee}")
         if employee:
             is_employee = True
-
     try:
-        await callback.message.delete()  # Удаляем исходное сообщение
+        await callback.message.delete()
     except TelegramBadRequest as e:
         logger.error(f"Ошибка удаления сообщения для пользователя @{username} (ID: {user_id}): {str(e)}")
-
     if is_admin:
         await state.clear()
         await bot.send_message(

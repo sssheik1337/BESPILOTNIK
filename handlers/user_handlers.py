@@ -42,7 +42,7 @@ async def create_appeal_prompt(callback: CallbackQuery, state: FSMContext, bot: 
                 InputMediaPhoto(media=FSInputFile("/data/start3.jpg"))
             ]
             await callback.message.edit_text(
-                "⚠️В целях безопасностиности включите автоматическое удаление сообщений через сутки в настройках Telegram.\n"
+                "⚠️В целях безопасности включите автоматическое удаление сообщений через сутки в настройках Telegram.\n"
                 "Инструкция в прикреплённых изображениях.⚠️",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="Я ВКЛЮЧИЛ АВТОУДАЛЕНИЕ", callback_data="confirm_auto_delete")]

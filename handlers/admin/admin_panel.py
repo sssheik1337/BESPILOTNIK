@@ -1,10 +1,10 @@
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import StateFilter
-from keyboards.inline import get_admin_panel_menu, get_remove_channel_menu, get_edit_channel_menu, get_employee_list_menu, get_my_appeals_menu, get_exam_menu
-from database.db import add_admin, add_notification_channel, get_notification_channels, get_admins, get_assigned_appeals, get_defect_reports, add_exam_record, get_exam_records, add_defect_report
+from keyboards.inline import get_admin_panel_menu, get_remove_channel_menu, get_edit_channel_menu, get_employee_list_menu, get_my_appeals_menu, get_exam_menu, get_training_centers_menu
+from database.db import add_admin, add_notification_channel, get_notification_channels, get_admins, get_assigned_appeals, get_defect_reports, add_exam_record, get_exam_records, add_defect_report, set_code_word, get_training_centers, update_training_center, validate_exam_record, add_training_center
 from config import MAIN_ADMIN_IDS, TOKEN
 from datetime import datetime
 import logging
@@ -28,8 +28,9 @@ class AdminResponse(StatesGroup):
     defect_report_media = State()
     defect_status_serial = State()
     exam_fio = State()
-    exam_subdivision = State()
+    exam_personal_number = State()
     exam_military_unit = State()
+    exam_subdivision = State()
     exam_callsign = State()
     exam_specialty = State()
     exam_contact = State()
@@ -37,6 +38,21 @@ class AdminResponse(StatesGroup):
     exam_photo = State()
     report_serial_from = State()
     report_serial_to = State()
+    change_code_word = State()
+    add_training_center_name = State()
+    add_training_center_link = State()
+    edit_training_center_link = State()
+
+@router.callback_query(F.data == "admin_panel")
+async def admin_panel_prompt(callback: CallbackQuery, **data):
+    if callback.from_user.id not in MAIN_ADMIN_IDS:
+        await callback.message.edit_text("Доступ запрещён.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+        ]))
+        logger.warning(f"Попытка доступа к админ-панели от неадминистратора @{callback.from_user.username}")
+        return
+    await callback.message.edit_text("Панель администратора:", reply_markup=get_admin_panel_menu())
+    logger.debug(f"Администратор @{callback.from_user.username} (ID: {callback.from_user.id}) открыл панель администратора")
 
 @router.callback_query(F.data == "exam_menu")
 async def exam_menu_prompt(callback: CallbackQuery, **data):
@@ -48,10 +64,253 @@ async def exam_menu_prompt(callback: CallbackQuery, **data):
         ]))
         return
     await callback.message.edit_text("Меню экзаменов:", reply_markup=get_exam_menu())
-    logger.info(f"Открыто меню экзаменов пользователем @{callback.from_user.username}")
-    await callback.answer()
+    logger.debug(f"Пользователь @{callback.from_user.username} (ID: {callback.from_user.id}) запросил меню экзаменов")
 
+@router.callback_query(F.data == "take_exam")
+async def take_exam_prompt(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Введите ФИО:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+    ]))
+    await state.set_state(AdminResponse.exam_fio)
+    logger.debug(f"Пользователь @{callback.from_user.username} (ID: {callback.from_user.id}) начал процесс принятия экзамена")
 
+@router.message(StateFilter(AdminResponse.exam_fio))
+async def process_exam_fio(message: Message, state: FSMContext):
+    fio = message.text.strip()
+    await state.update_data(fio=fio)
+    await message.answer("Введите личный номер или жетон (например, АВ-449852):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+    ]))
+    await state.set_state(AdminResponse.exam_personal_number)
+    logger.debug(f"ФИО {fio} принято от @{message.from_user.username} (ID: {message.from_user.id})")
+
+@router.message(StateFilter(AdminResponse.exam_personal_number))
+async def process_exam_personal_number(message: Message, state: FSMContext):
+    personal_number = message.text.strip()
+    await state.update_data(personal_number=personal_number)
+    await message.answer("Введите военную часть (например, В/Ч 29657):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+    ]))
+    await state.set_state(AdminResponse.exam_military_unit)
+    logger.debug(f"Личный номер {personal_number} принят от @{message.from_user.username} (ID: {message.from_user.id})")
+
+@router.message(StateFilter(AdminResponse.exam_military_unit))
+async def process_exam_military_unit(message: Message, state: FSMContext):
+    military_unit = message.text.strip()
+    await state.update_data(military_unit=military_unit)
+    await message.answer("Введите подразделение:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+    ]))
+    await state.set_state(AdminResponse.exam_subdivision)
+    logger.debug(f"В/Ч {military_unit} принято от @{message.from_user.username} (ID: {message.from_user.id})")
+
+@router.message(StateFilter(AdminResponse.exam_subdivision))
+async def process_exam_subdivision(message: Message, state: FSMContext):
+    subdivision = message.text.strip()
+    await state.update_data(subdivision=subdivision)
+    await message.answer("Введите позывной:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+    ]))
+    await state.set_state(AdminResponse.exam_callsign)
+    logger.debug(f"Подразделение {subdivision} принято от @{message.from_user.username} (ID: {message.from_user.id})")
+
+@router.message(StateFilter(AdminResponse.exam_callsign))
+async def process_exam_callsign(message: Message, state: FSMContext):
+    callsign = message.text.strip()
+    await state.update_data(callsign=callsign)
+    await message.answer("Введите специальность:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+    ]))
+    await state.set_state(AdminResponse.exam_specialty)
+    logger.debug(f"Позывной {callsign} принят от @{message.from_user.username} (ID: {message.from_user.id})")
+
+@router.message(StateFilter(AdminResponse.exam_specialty))
+async def process_exam_specialty(message: Message, state: FSMContext):
+    specialty = message.text.strip()
+    await state.update_data(specialty=specialty)
+    await message.answer("Введите контакт для связи в Telegram:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+    ]))
+    await state.set_state(AdminResponse.exam_contact)
+    logger.debug(f"Специальность {specialty} принята от @{message.from_user.username} (ID: {message.from_user.id})")
+
+@router.message(StateFilter(AdminResponse.exam_contact))
+async def process_exam_contact(message: Message, state: FSMContext):
+    contact = message.text.strip()
+    await state.update_data(contact=contact)
+    # Проверяем, существует ли запись
+    data_state = await state.get_data()
+    fio = data_state.get("fio")
+    personal_number = data_state.get("personal_number")
+    military_unit = data_state.get("military_unit")
+    subdivision = data_state.get("subdivision")
+    specialty = data_state.get("specialty")
+    exam_id = await validate_exam_record(fio, personal_number, military_unit, subdivision, specialty, contact)
+    if exam_id:
+        await state.update_data(exam_id=exam_id)
+        await message.answer("Запись найдена. Прикрепите видео:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+        ]))
+    else:
+        await message.answer("Прикрепите видео:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+        ]))
+    await state.set_state(AdminResponse.exam_video)
+    logger.debug(f"Контакт {contact} принят от @{message.from_user.username} (ID: {message.from_user.id})")
+
+@router.message(StateFilter(AdminResponse.exam_video))
+async def process_exam_video(message: Message, state: FSMContext):
+    if not message.video:
+        await message.answer("Пожалуйста, прикрепите видео.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+        ]))
+        return
+    bot = Bot(token=TOKEN)
+    video_file = await bot.get_file(message.video.file_id)
+    video_link = f"https://api.telegram.org/file/bot{TOKEN}/{video_file.file_path}"
+    await state.update_data(video_link=video_link)
+    await message.answer("Прикрепите фото (до 10 файлов):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Готово", callback_data="finish_exam")]
+    ]))
+    await state.set_state(AdminResponse.exam_photo)
+    logger.debug(f"Видео принято от @{message.from_user.username} (ID: {message.from_user.id})")
+    await bot.session.close()
+
+@router.message(StateFilter(AdminResponse.exam_photo))
+async def process_exam_photo(message: Message, state: FSMContext):
+    data_state = await state.get_data()
+    photo_links = data_state.get("photo_links", [])
+    bot = Bot(token=TOKEN)
+    if message.photo:
+        photo_file = await bot.get_file(message.photo[-1].file_id)
+        photo_link = f"https://api.telegram.org/file/bot{TOKEN}/{photo_file.file_path}"
+        photo_links.append(photo_link)
+        await state.update_data(photo_links=photo_links)
+        await message.answer(f"Фото добавлено ({len(photo_links)}/10). Прикрепите ещё или нажмите 'Готово':",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="Готово", callback_data="finish_exam")]
+                            ]))
+        logger.debug(f"Фото добавлено для экзамена от @{message.from_user.username} (ID: {message.from_user.id})")
+    else:
+        await message.answer("Пожалуйста, прикрепите фото или нажмите 'Готово'.",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="Готово", callback_data="finish_exam")]
+                            ]))
+        logger.warning(f"Некорректный ввод фото для экзамена от @{message.from_user.username}")
+    await bot.session.close()
+
+@router.callback_query(F.data == "finish_exam")
+async def finish_exam(callback: CallbackQuery, state: FSMContext):
+    data_state = await state.get_data()
+    fio = data_state.get("fio")
+    personal_number = data_state.get("personal_number")
+    military_unit = data_state.get("military_unit")
+    subdivision = data_state.get("subdivision")
+    callsign = data_state.get("callsign")
+    specialty = data_state.get("specialty")
+    contact = data_state.get("contact")
+    video_link = data_state.get("video_link")
+    photo_links = data_state.get("photo_links", [])
+    await add_exam_record(fio, subdivision, military_unit, callsign, specialty, contact, personal_number, video_link, photo_links)
+    await callback.message.edit_text("Экзамен успешно сохранён!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+    ]))
+    logger.info(f"Экзамен сохранён для {fio} пользователем @{callback.from_user.username}")
+    await state.clear()
+
+@router.callback_query(F.data == "change_code_word")
+async def change_code_word_prompt(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in MAIN_ADMIN_IDS:
+        await callback.message.edit_text("Доступ запрещён.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+        ]))
+        logger.warning(f"Попытка изменения кодового слова от неадминистратора @{callback.from_user.username}")
+        return
+    await callback.message.edit_text("Введите новое кодовое слово:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]
+    ]))
+    await state.set_state(AdminResponse.change_code_word)
+    logger.debug(f"Администратор @{callback.from_user.username} (ID: {callback.from_user.id}) запросил изменение кодового слова")
+
+@router.message(StateFilter(AdminResponse.change_code_word))
+async def process_code_word(message: Message, state: FSMContext):
+    code_word = message.text.strip()
+    await set_code_word(code_word)
+    await message.answer("Кодовое слово успешно обновлено!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]
+    ]))
+    logger.info(f"Кодовое слово обновлено администратором @{message.from_user.username} (ID: {message.from_user.id})")
+    await state.clear()
+
+@router.callback_query(F.data == "manage_training_centers")
+async def manage_training_centers_prompt(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in MAIN_ADMIN_IDS:
+        await callback.message.edit_text("Доступ запрещён.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+        ]))
+        logger.warning(f"Попытка управления УТЦ от неадминистратора @{callback.from_user.username}")
+        return
+    centers = await get_training_centers()
+    await callback.message.edit_text("Управление УТЦ:", reply_markup=get_training_centers_menu(centers))
+    logger.debug(f"Администратор @{callback.from_user.username} (ID: {callback.from_user.id}) запросил управление УТЦ")
+
+@router.callback_query(F.data == "add_training_center")
+async def add_training_center_prompt(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in MAIN_ADMIN_IDS:
+        await callback.message.edit_text("Доступ запрещён.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+        ]))
+        logger.warning(f"Попытка добавления УТЦ от неадминистратора @{callback.from_user.username}")
+        return
+    await callback.message.edit_text("Введите название УТЦ:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_training_centers")]
+    ]))
+    await state.set_state(AdminResponse.add_training_center_name)
+    logger.debug(f"Администратор @{callback.from_user.username} (ID: {callback.from_user.id}) запросил добавление УТЦ")
+
+@router.message(StateFilter(AdminResponse.add_training_center_name))
+async def process_training_center_name(message: Message, state: FSMContext):
+    center_name = message.text.strip()
+    await state.update_data(center_name=center_name)
+    await message.answer("Введите ссылку на чат УТЦ:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_training_centers")]
+    ]))
+    await state.set_state(AdminResponse.add_training_center_link)
+    logger.debug(f"Название УТЦ {center_name} принято от @{message.from_user.username} (ID: {message.from_user.id})")
+
+@router.message(StateFilter(AdminResponse.add_training_center_link))
+async def process_training_center_link(message: Message, state: FSMContext):
+    chat_link = message.text.strip()
+    data_state = await state.get_data()
+    center_name = data_state.get("center_name")
+    await add_training_center(center_name, chat_link)
+    await message.answer(f"УТЦ {center_name} успешно добавлен!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_training_centers")]
+    ]))
+    logger.info(f"УТЦ {center_name} добавлен администратором @{message.from_user.username} (ID: {message.from_user.id})")
+    await state.clear()
+
+@router.callback_query(F.data.startswith("edit_center_"))
+async def edit_training_center_prompt(callback: CallbackQuery, state: FSMContext):
+    center_id = int(callback.data.split("_")[-1])
+    await callback.message.edit_text("Введите новую ссылку на чат УТЦ:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_training_centers")]
+    ]))
+    await state.set_state(AdminResponse.edit_training_center_link)
+    await state.update_data(center_id=center_id)
+    logger.debug(f"Администратор @{callback.from_user.username} (ID: {callback.from_user.id}) запросил редактирование УТЦ ID {center_id}")
+
+@router.message(StateFilter(AdminResponse.edit_training_center_link))
+async def process_edit_training_center_link(message: Message, state: FSMContext):
+    chat_link = message.text.strip()
+    data_state = await state.get_data()
+    center_id = data_state.get("center_id")
+    await update_training_center(center_id, chat_link)
+    await message.answer("Ссылка на чат УТЦ обновлена!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_training_centers")]
+    ]))
+    logger.info(f"Ссылка на чат УТЦ ID {center_id} обновлена администратором @{message.from_user.username} (ID: {message.from_user.id})")
+    await state.clear()
 
 @router.callback_query(F.data == "stats")
 async def show_stats(callback: CallbackQuery, **data):
@@ -91,18 +350,6 @@ async def show_stats(callback: CallbackQuery, **data):
     ])
     await callback.message.edit_text(response, reply_markup=keyboard)
     logger.info(f"Статистика запрошена пользователем @{callback.from_user.username}")
-
-@router.callback_query(F.data == "admin_panel")
-async def admin_panel(callback: CallbackQuery):
-    if callback.from_user.id not in MAIN_ADMIN_IDS:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-        ])
-        await callback.message.edit_text("Доступ запрещён.", reply_markup=keyboard)
-        logger.warning(f"Попытка доступа к админ-панели от неадминистратора @{callback.from_user.username}")
-        return
-    await callback.message.edit_text("Панель администратора:", reply_markup=get_admin_panel_menu())
-    logger.info(f"Пользователь @{callback.from_user.username} открыл админ-панель")
 
 @router.callback_query(F.data == "add_employee")
 async def add_employee_prompt(callback: CallbackQuery, state: FSMContext):
@@ -614,109 +861,6 @@ async def set_defect_status(callback: CallbackQuery, state: FSMContext, **data):
     logger.info(f"Статус устройства {serial} изменён на '{status}' пользователем @{callback.from_user.username}")
     await state.clear()
 
-@router.callback_query(F.data == "take_exam")
-async def take_exam_prompt(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in MAIN_ADMIN_IDS:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-        ])
-        await callback.message.edit_text("Доступ запрещён.", reply_markup=keyboard)
-        logger.warning(f"Попытка принятия экзамена от неадминистратора @{callback.from_user.username}")
-        return
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-    ])
-    await callback.message.edit_text("Введите ФИО:", reply_markup=keyboard)
-    await state.set_state(AdminResponse.exam_fio)
-    logger.debug(f"Запрос принятия экзамена от @{callback.from_user.username}")
-
-@router.message(StateFilter(AdminResponse.exam_fio))
-async def process_exam_fio(message: Message, state: FSMContext):
-    fio = message.text.strip()
-    await state.update_data(fio=fio)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
-    ])
-    await message.answer("Введите подразделение:", reply_markup=keyboard)
-    await state.set_state(AdminResponse.exam_subdivision)
-    logger.debug(f"ФИО введено: {fio} от @{message.from_user.username}")
-
-@router.message(StateFilter(AdminResponse.exam_subdivision))
-async def process_exam_subdivision(message: Message, state: FSMContext):
-    subdivision = message.text.strip()
-    await state.update_data(subdivision=subdivision)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
-    ])
-    await message.answer("Введите В/Ч:", reply_markup=keyboard)
-    await state.set_state(AdminResponse.exam_military_unit)
-    logger.debug(f"Подразделение введено: {subdivision} от @{message.from_user.username}")
-
-@router.message(StateFilter(AdminResponse.exam_military_unit))
-async def process_exam_military_unit(message: Message, state: FSMContext):
-    military_unit = message.text.strip()
-    await state.update_data(military_unit=military_unit)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
-    ])
-    await message.answer("Введите позывной:", reply_markup=keyboard)
-    await state.set_state(AdminResponse.exam_callsign)
-    logger.debug(f"В/Ч введено: {military_unit} от @{message.from_user.username}")
-
-@router.message(StateFilter(AdminResponse.exam_callsign))
-async def process_exam_callsign(message: Message, state: FSMContext):
-    callsign = message.text.strip()
-    await state.update_data(callsign=callsign)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
-    ])
-    await message.answer("Введите специальность:", reply_markup=keyboard)
-    await state.set_state(AdminResponse.exam_specialty)
-    logger.debug(f"Позывной введён: {callsign} от @{message.from_user.username}")
-
-@router.message(StateFilter(AdminResponse.exam_specialty))
-async def process_exam_specialty(message: Message, state: FSMContext):
-    specialty = message.text.strip()
-    await state.update_data(specialty=specialty)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
-    ])
-    await message.answer("Введите контакт:", reply_markup=keyboard)
-    await state.set_state(AdminResponse.exam_contact)
-    logger.debug(f"Специальность введена: {specialty} от @{message.from_user.username}")
-
-@router.message(StateFilter(AdminResponse.exam_contact))
-async def process_exam_contact(message: Message, state: FSMContext):
-    contact = message.text.strip()
-    await state.update_data(contact=contact)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Готово", callback_data="done_exam_video")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
-    ])
-    await message.answer("Прикрепите видео материал (или 'Готово'):", reply_markup=keyboard)
-    await state.set_state(AdminResponse.exam_video)
-    logger.debug(f"Контакт введён: {contact} от @{message.from_user.username}")
-
-@router.message(StateFilter(AdminResponse.exam_video))
-async def process_exam_video(message: Message, state: FSMContext):
-    if message.video:
-        file_id = message.video.file_id
-        file = await message.bot.get_file(file_id)
-        file_path = file.file_path
-        video_link = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-        await state.update_data(video_link=video_link)
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Готово", callback_data="done_exam_photo")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
-        ])
-        await message.answer("Прикрепите фото экзаменационного листа (до 10, или 'Готово'):", reply_markup=keyboard)
-        await state.set_state(AdminResponse.exam_photo)
-        await state.update_data(photo_links=[])
-        logger.debug(f"Видео добавлено для экзамена от @{message.from_user.username}: {video_link}")
-    else:
-        await message.answer("Прикрепите видео или нажмите 'Готово' для пропуска.")
-        logger.warning(f"Неверный формат видео от @{message.from_user.username}")
-
 @router.callback_query(F.data == "done_exam_video")
 async def skip_exam_video(callback: CallbackQuery, state: FSMContext):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -727,34 +871,6 @@ async def skip_exam_video(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminResponse.exam_photo)
     await state.update_data(photo_links=[])
     logger.debug(f"Видео пропущено для экзамена от @{callback.from_user.username}")
-
-@router.message(StateFilter(AdminResponse.exam_photo))
-async def process_exam_photo(message: Message, state: FSMContext):
-    data_state = await state.get_data()
-    photo_links = data_state.get("photo_links", [])
-    if len(photo_links) >= 10:
-        await message.answer("Достигнуто максимальное количество фото (10). Нажмите 'Готово'.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Готово", callback_data="done_exam_photo")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
-        ]))
-        return
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Готово", callback_data="done_exam_photo")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
-    ])
-    is_valid, media = validate_media(message)
-    if is_valid and media[0]['type'] == "photo":
-        file_id = media[0]['file_id']
-        file = await message.bot.get_file(file_id)
-        file_path = file.file_path
-        full_link = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-        photo_links.append(full_link)
-        await state.update_data(photo_links=photo_links)
-        await message.answer(f"Фото добавлено ({len(photo_links)}/10). Приложите ещё или нажмите 'Готово':", reply_markup=keyboard)
-        logger.debug(f"Фото добавлено для экзамена от @{message.from_user.username}: {full_link}")
-    else:
-        await message.answer("Неподдерживаемый формат. Приложите фото (png/jpeg).", reply_markup=keyboard)
-        logger.warning(f"Неподдерживаемый формат для фото экзамена от @{message.from_user.username}")
 
 @router.callback_query(F.data == "done_exam_photo")
 async def skip_exam_photo(callback: CallbackQuery, state: FSMContext):
@@ -825,13 +941,13 @@ async def export_exams_handler(callback: CallbackQuery, **data):
         logger.error("db_pool отсутствует в data")
         await callback.message.delete()
         await callback.message.answer("Ошибка сервера. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
         ]))
         return
     records = await get_exam_records()
     if not records:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
         ])
         await callback.message.delete()
         await callback.message.answer("Нет данных для выгрузки.", reply_markup=keyboard)
@@ -842,13 +958,14 @@ async def export_exams_handler(callback: CallbackQuery, **data):
         photo_links = json.loads(record['photo_links'] or "[]")
         data.append({
             'ФИО': record['fio'],
+            'Личный номер': record['personal_number'],
             'Подразделение': record['subdivision'],
             'В/Ч': record['military_unit'],
             'Позывной': record['callsign'],
             'Специальность': record['specialty'],
             'Контакт': record['contact'],
             'Видео': record['video_link'] or 'Отсутствует',
-            'Фото': ', '.join(photo_links)
+            'Фото': ', '.join(photo_links) or 'Отсутствует'
         })
     df = pd.DataFrame(data)
     output = BytesIO()

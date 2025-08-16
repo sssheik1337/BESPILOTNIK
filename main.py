@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery, InputMediaPhoto, FSInputFile
 from aiogram.fsm.storage.memory import MemoryStorage
 from config import TOKEN, MAIN_ADMIN_IDS
-from handlers import user_handlers, common_handlers
+from handlers import user_handlers, common_handlers, user_exam
 from handlers.admin import serial_history, appeal_actions, admin_panel, defect_management, base_management, overdue_checks, closed_appeals
 from database.db import initialize_db, close_db, get_open_appeals, get_appeal, close_appeal, get_db_pool
 from datetime import datetime, timedelta
@@ -71,8 +71,11 @@ class SerialCheckMiddleware(BaseMiddleware):
         is_confirm_auto_delete = isinstance(event, CallbackQuery) and event.data == "confirm_auto_delete"
         is_start_command = isinstance(event, Message) and event.text and event.text.startswith("/start")
         is_waiting_for_serial = current_state == "UserState:waiting_for_serial"
-        if is_start_command or is_confirm_auto_delete or is_waiting_for_serial:
-            logger.debug(f"Пропускаем {'/start' if is_start_command else 'confirm_auto_delete' if is_confirm_auto_delete else 'waiting_for_serial'} для пользователя @{username} (ID: {user_id})")
+        is_request_support = isinstance(event, CallbackQuery) and event.data == "request_support"
+        is_enroll_training = isinstance(event, CallbackQuery) and event.data == "enroll_training"
+        is_user_exam_state = current_state and current_state.startswith("UserExam:")
+        if is_start_command or is_confirm_auto_delete or is_waiting_for_serial or is_request_support or is_enroll_training or is_user_exam_state:
+            logger.debug(f"Пропускаем {'/start' if is_start_command else 'confirm_auto_delete' if is_confirm_auto_delete else 'waiting_for_serial' if is_waiting_for_serial else 'request_support' if is_request_support else 'enroll_training' if is_enroll_training else 'user_exam_state'} для пользователя @{username} (ID: {user_id})")
             return await handler(update, data)
         if "serial" not in data_state:
             logger.warning(f"Попытка доступа без серийного номера от пользователя @{username} (ID: {user_id})")
@@ -86,20 +89,24 @@ class SerialCheckMiddleware(BaseMiddleware):
                     InputMediaPhoto(media=FSInputFile("/data/start2.jpg")),
                     InputMediaPhoto(media=FSInputFile("/data/start3.jpg"))
                 ]
-                text = "⚠️В целях безопасности включите автоматическое удаление сообщений через сутки в настройках Telegram.\n"
-                "Инструкция в прикреплённых изображениях.⚠️"
+                text = "⚠️В целях безопасности включите автоудаление сообщений через сутки и введите серийный номер заново.⚠️"
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="Я ВКЛЮЧИЛ АВТОУДАЛЕНИЕ", callback_data="confirm_auto_delete")]
                 ])
                 if isinstance(event, Message):
-                    logger.debug(f"Отправка сообщения об автоудалении для Message от @{username} (ID: {user_id})")
-                    await bot.send_media_group(chat_id=chat_id, media=media)  # Сначала отправляем медиа
-                    await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)  # Затем текст
+                    logger.debug(f"Отправка медиа для Message от @{username} (ID: {user_id})")
+                    await bot.send_media_group(chat_id=chat_id, media=media)
+                    logger.debug(f"Медиа отправлены для Message от @{username} (ID: {user_id})")
+                    await asyncio.sleep(0.5)  # Задержка для гарантии порядка
+                    await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+                    logger.debug(f"Сообщение об автоудалении отправлено для Message от @{username} (ID: {user_id})")
                 elif isinstance(event, CallbackQuery):
-                    logger.debug(f"Отправка сообщения об автоудалении для CallbackQuery от @{username} (ID: {user_id})")
-                    await bot.send_media_group(chat_id=chat_id, media=media)  # Сначала отправляем медиа
-                    await event.message.edit_text(text, reply_markup=keyboard)  # Затем текст
-                logger.debug(f"Сообщение об автоудалении отправлено для пользователя @{username} (ID: {user_id})")
+                    logger.debug(f"Отправка медиа для CallbackQuery от @{username} (ID: {user_id})")
+                    await bot.send_media_group(chat_id=chat_id, media=media)
+                    logger.debug(f"Медиа отправлены для CallbackQuery от @{username} (ID: {user_id})")
+                    await asyncio.sleep(0.5)  # Задержка для гарантии порядка
+                    await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+                    logger.debug(f"Сообщение об автоудалении отправлено для CallbackQuery от @{username} (ID: {user_id})")
             except (TelegramBadRequest, TelegramForbiddenError, FileNotFoundError) as e:
                 logger.error(f"Ошибка отправки сообщения об автоудалении для пользователя @{username} (ID: {user_id}): {str(e)}")
                 if isinstance(event, Message):
@@ -110,22 +117,18 @@ class SerialCheckMiddleware(BaseMiddleware):
         logger.debug(f"Пользователь @{username} (ID: {user_id}) прошёл проверку, передаём управление хэндлеру")
         return await handler(update, data)
 
-async def check_overdue_appeals(bot):
+async def check_overdue_appeals(bot: Bot):
     while True:
         try:
-            db_pool = await get_db_pool()
-            async with db_pool.acquire() as conn:
-                appeals = await conn.fetch(
-                    "SELECT appeal_id, last_response_time, user_id, admin_id FROM appeals WHERE status = 'in_progress' AND last_response_time IS NOT NULL"
-                )
+            appeals, _ = await get_open_appeals(page=0)
             for appeal in appeals:
-                last_response_time = datetime.strptime(appeal['last_response_time'], "%Y-%m-%dT%H:%M")
-                if datetime.now() - last_response_time > timedelta(hours=48):  # Продакшн: 48 часов
+                created_time = datetime.strptime(appeal['created_time'], "%Y-%m-%dT%H:%M")
+                if (datetime.now() - created_time).days > 30 and appeal['status'] == 'new':
                     await close_appeal(appeal['appeal_id'])
-                    text = f"Заявка №{appeal['appeal_id']} автоматически закрыта из-за отсутствия ответа в течение 48 часов."
+                    text = f"Заявка №{appeal['appeal_id']} автоматически закрыта по истечении 30 дней."
                     try:
                         await bot.send_message(
-                            chat_id=appeal['user_id'],
+                            chat_id=appeal["user_id"],
                             text=text,
                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
@@ -147,7 +150,7 @@ async def check_overdue_appeals(bot):
                         except Exception as e:
                             logger.error(f"Ошибка отправки уведомления админу ID {appeal['admin_id']} для заявки №{appeal['appeal_id']}: {e}")
                     for main_admin_id in MAIN_ADMIN_IDS:
-                        if not appeal['admin_id'] or main_admin_id != appeal['admin_id']:  # Исключаем дублирование
+                        if not appeal['admin_id'] or main_admin_id != appeal['admin_id']:
                             try:
                                 await bot.send_message(
                                     chat_id=main_admin_id,
@@ -160,7 +163,7 @@ async def check_overdue_appeals(bot):
                             except Exception as e:
                                 logger.error(f"Ошибка отправки уведомления главному админу ID {main_admin_id} для заявки №{appeal['appeal_id']}: {e}")
                     logger.info(f"Заявка №{appeal['appeal_id']} автоматически закрыта")
-            await asyncio.sleep(3600)  # Проверка каждый час
+            await asyncio.sleep(3600)
         except Exception as e:
             logger.error(f"Ошибка в шедулере просроченных заявок: {e}")
             await asyncio.sleep(3600)
@@ -173,6 +176,7 @@ async def main():
     dp.update.outer_middleware.register(SerialCheckMiddleware())
     dp.include_router(user_handlers.router)
     dp.include_router(common_handlers.router)
+    dp.include_router(user_exam.router)
     dp.include_router(serial_history.router)
     dp.include_router(appeal_actions.router)
     dp.include_router(admin_panel.router)
