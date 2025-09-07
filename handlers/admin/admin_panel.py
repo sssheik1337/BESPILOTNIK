@@ -4,7 +4,10 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import StateFilter
 from keyboards.inline import get_admin_panel_menu, get_remove_channel_menu, get_edit_channel_menu, get_employee_list_menu, get_my_appeals_menu, get_exam_menu, get_training_centers_menu
-from database.db import add_admin, add_notification_channel, get_notification_channels, get_admins, get_assigned_appeals, get_defect_reports, add_exam_record, get_exam_records, add_defect_report, set_code_word, get_training_centers, update_training_center, validate_exam_record, add_training_center
+from database.db import (add_admin, add_notification_channel, get_notification_channels, get_admins,
+                         get_assigned_appeals, get_defect_reports, add_exam_record,
+                         get_exam_records, add_defect_report, set_code_word, get_training_centers,
+                         update_training_center, validate_exam_record, add_training_center, get_exam_records_by_personal_number, update_exam_record)
 from config import MAIN_ADMIN_IDS, TOKEN
 from datetime import datetime
 import logging
@@ -14,6 +17,9 @@ import pandas as pd
 import json
 from utils.validators import validate_media
 from utils.statuses import APPEAL_STATUSES
+import aiohttp
+import json
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +40,7 @@ class AdminResponse(StatesGroup):
     exam_callsign = State()
     exam_specialty = State()
     exam_contact = State()
+    exam_training_center = State()
     exam_video = State()
     exam_photo = State()
     report_serial_from = State()
@@ -42,6 +49,52 @@ class AdminResponse(StatesGroup):
     add_training_center_name = State()
     add_training_center_link = State()
     edit_training_center_link = State()
+
+
+
+async def download_from_local_api(file_id: str, token: str, base_dir: str) -> str:
+    async with aiohttp.ClientSession() as session:
+        # Проверка локального сервера
+        async with session.get(f"http://localhost:8081/bot{token}/getMe", ssl=False) as test_resp:
+            logger.debug(f"Тестовый запрос к http://localhost:8081/bot{token}/getMe, статус: {test_resp.status}")
+            if test_resp.status != 200:
+                raise Exception(f"Сервер недоступен: HTTP {test_resp.status}")
+        # Получаем file_path
+        async with session.get(f"http://localhost:8081/bot{token}/getFile?file_id={file_id}", ssl=False) as resp:
+            logger.debug(f"HTTP-запрос getFile: http://localhost:8081/bot{token}/getFile?file_id={file_id}, статус: {resp.status}")
+            if resp.status != 200:
+                raise Exception(f"Ошибка getFile: HTTP {resp.status}, ответ: {await resp.text()}")
+            data = await resp.json()
+            if not data.get("ok"):
+                raise Exception(f"Ошибка getFile: {data}")
+            file_path = data["result"]["file_path"]
+            logger.debug(f"Получен file_path: {file_path}")
+            # Обрезаем только префикс /var/lib/telegram-bot-api/
+            if file_path.startswith("/var/lib/telegram-bot-api/"):
+                file_path = file_path.replace("/var/lib/telegram-bot-api/", "", 1)
+            # Формируем относительный путь для HTTP и локального доступа
+            relative_path = file_path
+            local_path = os.path.join(base_dir, relative_path.replace("/", os.sep))
+            # Проверяем, есть ли файл на диске
+            if os.path.exists(local_path):
+                logger.debug(f"Файл найден локально: {local_path}")
+                return local_path
+            # Fallback на HTTP
+            url = f"http://localhost:8081/file/bot{token}/{relative_path}"
+            async with session.get(url, ssl=False) as resp:
+                logger.debug(f"HTTP-запрос к {url}, статус: {resp.status}")
+                if resp.status != 200:
+                    raise Exception(f"Ошибка загрузки файла: HTTP {resp.status}, ответ: {await resp.text()}")
+                content = await resp.read()
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                with open(local_path, "wb") as f:
+                    f.write(content)
+                logger.debug(f"Файл загружен через HTTP и сохранён: {local_path}")
+            return local_path
+
+
+
+
 
 @router.callback_query(F.data == "admin_panel")
 async def admin_panel_prompt(callback: CallbackQuery, **data):
@@ -53,6 +106,44 @@ async def admin_panel_prompt(callback: CallbackQuery, **data):
         return
     await callback.message.edit_text("Панель администратора:", reply_markup=get_admin_panel_menu())
     logger.debug(f"Администратор @{callback.from_user.username} (ID: {callback.from_user.id}) открыл панель администратора")
+
+@router.callback_query(F.data.startswith("select_exam_"))
+async def select_exam_record(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data")
+        await callback.message.edit_text("Ошибка сервера. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+        ]))
+        return
+    exam_id = int(callback.data.split("_")[-1])
+    async with db_pool.acquire() as conn:
+        record = await conn.fetchrow("SELECT * FROM exam_records WHERE exam_id = $1", exam_id)
+        if not record:
+            await callback.message.edit_text("Запись не найдена.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+            ]))
+            logger.warning(f"Запись экзамена ID {exam_id} не найдена для @{callback.from_user.username}")
+            return
+    await state.update_data(exam_id=exam_id, fio=record['fio'], personal_number=record['personal_number'],
+                           military_unit=record['military_unit'], subdivision=record['subdivision'],
+                           callsign=record['callsign'], specialty=record['specialty'], contact=record['contact'])
+    await callback.message.edit_text("Прикрепите видео:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+    ]))
+    await state.set_state(AdminResponse.exam_video)
+    logger.debug(f"Выбрана запись экзамена ID {exam_id} для @{callback.from_user.username}")
+
+@router.callback_query(F.data == "new_exam_record")
+async def new_exam_record(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(exam_id=None)  # Очищаем exam_id для новой записи
+    await callback.message.edit_text("Введите военную часть (например, В/Ч 29657):",
+                                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                         [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+                                     ]))
+    await state.set_state(AdminResponse.exam_military_unit)
+    logger.debug(
+        f"Администратор @{(callback.from_user.username or 'неизвестно')} выбрал создание новой записи экзамена")
 
 @router.callback_query(F.data == "exam_menu")
 async def exam_menu_prompt(callback: CallbackQuery, **data):
@@ -68,7 +159,9 @@ async def exam_menu_prompt(callback: CallbackQuery, **data):
 
 @router.callback_query(F.data == "take_exam")
 async def take_exam_prompt(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите ФИО:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    await callback.message.edit_text("⚠️ Внимание!\n"
+                                     "Продолжая использовать бот, вы автоматически соглашаетесь с обработкой ваших персональных данных.\n"
+                                     "Введите ФИО:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
     ]))
     await state.set_state(AdminResponse.exam_fio)
@@ -85,14 +178,46 @@ async def process_exam_fio(message: Message, state: FSMContext):
     logger.debug(f"ФИО {fio} принято от @{message.from_user.username} (ID: {message.from_user.id})")
 
 @router.message(StateFilter(AdminResponse.exam_personal_number))
-async def process_exam_personal_number(message: Message, state: FSMContext):
+async def process_personal_number(message: Message, state: FSMContext, bot: Bot, **data):
     personal_number = message.text.strip()
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data")
+        await message.answer("Ошибка сервера. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+        ]))
+        return
     await state.update_data(personal_number=personal_number)
-    await message.answer("Введите военную часть (например, В/Ч 29657):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
-    ]))
-    await state.set_state(AdminResponse.exam_military_unit)
-    logger.debug(f"Личный номер {personal_number} принят от @{message.from_user.username} (ID: {message.from_user.id})")
+    logger.debug(
+        f"Личный номер {personal_number} сохранён в состоянии для @{message.from_user.username} (ID: {message.from_user.id})")
+    async with db_pool.acquire() as conn:
+        records = await get_exam_records_by_personal_number(personal_number)
+        if records:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"Запись №{r['exam_id']}: {r['fio']}",
+                                      callback_data=f"select_exam_{r['exam_id']}")]
+                for r in records
+            ])
+            keyboard.inline_keyboard.append(
+                [InlineKeyboardButton(text="Создать новую запись", callback_data="new_exam_record")])
+            keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")])
+            await message.answer("Найдены существующие записи. Выберите запись или создайте новую:",
+                                 reply_markup=keyboard)
+            logger.debug(
+                f"Найдено {len(records)} записей для личного номера {personal_number} от @{message.from_user.username}")
+        else:
+            await message.answer("Введите военную часть (например, В/Ч 29657):",
+                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                     [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+                                 ]))
+            await state.set_state(AdminResponse.exam_military_unit)
+            logger.debug(
+                f"Записей для личного номера {personal_number} не найдено, продолжаем ввод данных для @{message.from_user.username}")
+    try:
+        await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
+        logger.debug(f"Сообщение с личным номером удалено для @{message.from_user.username}")
+    except TelegramBadRequest as e:
+        logger.error(f"Ошибка удаления сообщения с личным номером для @{message.from_user.username}: {str(e)}")
 
 @router.message(StateFilter(AdminResponse.exam_military_unit))
 async def process_exam_military_unit(message: Message, state: FSMContext):
@@ -118,7 +243,7 @@ async def process_exam_subdivision(message: Message, state: FSMContext):
 async def process_exam_callsign(message: Message, state: FSMContext):
     callsign = message.text.strip()
     await state.update_data(callsign=callsign)
-    await message.answer("Введите специальность:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    await message.answer("Введите направление:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
     ]))
     await state.set_state(AdminResponse.exam_specialty)
@@ -132,49 +257,82 @@ async def process_exam_specialty(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
     ]))
     await state.set_state(AdminResponse.exam_contact)
-    logger.debug(f"Специальность {specialty} принята от @{message.from_user.username} (ID: {message.from_user.id})")
 
 @router.message(StateFilter(AdminResponse.exam_contact))
-async def process_exam_contact(message: Message, state: FSMContext):
+async def process_exam_contact(message: Message, state: FSMContext, **data):
     contact = message.text.strip()
     await state.update_data(contact=contact)
-    # Проверяем, существует ли запись
-    data_state = await state.get_data()
-    fio = data_state.get("fio")
-    personal_number = data_state.get("personal_number")
-    military_unit = data_state.get("military_unit")
-    subdivision = data_state.get("subdivision")
-    specialty = data_state.get("specialty")
-    exam_id = await validate_exam_record(fio, personal_number, military_unit, subdivision, specialty, contact)
-    if exam_id:
-        await state.update_data(exam_id=exam_id)
-        await message.answer("Запись найдена. Прикрепите видео:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
-        ]))
-    else:
-        await message.answer("Прикрепите видео:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
-        ]))
-    await state.set_state(AdminResponse.exam_video)
-    logger.debug(f"Контакт {contact} принят от @{message.from_user.username} (ID: {message.from_user.id})")
-
-@router.message(StateFilter(AdminResponse.exam_video))
-async def process_exam_video(message: Message, state: FSMContext):
-    if not message.video:
-        await message.answer("Пожалуйста, прикрепите видео.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data")
+        await message.answer("Ошибка сервера. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
         ]))
         return
-    bot = Bot(token=TOKEN)
-    video_file = await bot.get_file(message.video.file_id)
-    video_link = f"https://api.telegram.org/file/bot{TOKEN}/{video_file.file_path}"
-    await state.update_data(video_link=video_link)
-    await message.answer("Прикрепите фото (до 10 файлов):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Готово", callback_data="finish_exam")]
-    ]))
-    await state.set_state(AdminResponse.exam_photo)
-    logger.debug(f"Видео принято от @{message.from_user.username} (ID: {message.from_user.id})")
-    await bot.session.close()
+    async with db_pool.acquire() as conn:
+        centers = await conn.fetch("SELECT id, center_name FROM training_centers WHERE center_name IS NOT NULL ORDER BY center_name")
+        if not centers:
+            logger.error("Учебные центры с валидными названиями не найдены")
+            await message.answer("Ошибка: Нет доступных учебных центров. Обратитесь к администратору.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+            ]))
+            return
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=center['center_name'], callback_data=f"select_center_{center['id']}")]
+            for center in centers
+        ])
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")])
+        await message.answer("Выберите учебный центр:", reply_markup=keyboard)
+    await state.set_state(AdminResponse.exam_training_center)
+    logger.debug(f"Контакт {contact} принят от @{message.from_user.username} (ID: {message.from_user.id})")
+
+@router.message(StateFilter(AdminResponse.exam_video), F.video)
+async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data")
+        await message.answer("Ошибка сервера. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+        ]))
+        await state.clear()
+        return
+
+    try:
+        if message.video.file_size > 2_000_000_000:  # Проверка размера (2 ГБ)
+            await message.answer("Видео слишком большое (максимум 2 ГБ).", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+            ]))
+            logger.warning(f"Видео слишком большое ({message.video.file_size} байт) от @{message.from_user.username}")
+            await state.clear()
+            return
+
+        # Проверяем, есть ли training_center_id в состоянии
+        state_data = await state.get_data()
+        if "training_center_id" not in state_data:
+            logger.error(f"training_center_id отсутствует в состоянии для @{message.from_user.username}")
+            await message.answer("Ошибка: не выбран учебный центр.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+            ]))
+            await state.clear()
+            return
+
+        local_path = await download_from_local_api(
+            file_id=message.video.file_id,
+            token=TOKEN,
+            base_dir="C:/Users/hrome/BESPILOTNIK_files/telegram-bot-api-files"
+        )
+        await state.update_data(video_link=local_path)
+        await message.answer("Видео принято. Загрузите фото (до 5 штук) или завершите.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Завершить", callback_data="finish_exam")]
+        ]))
+        logger.debug(f"Видео принято от @{message.from_user.username} (ID: {message.from_user.id}), file_id: {message.video.file_id}, local_path: {local_path}")
+        await state.set_state(AdminResponse.exam_photo)
+    except Exception as e:
+        logger.error(f"Ошибка обработки видео от @{message.from_user.username}: {e}")
+        await message.answer(f"Ошибка сервера: {str(e)}. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+        ]))
+        await state.clear()
 
 @router.message(StateFilter(AdminResponse.exam_photo))
 async def process_exam_photo(message: Message, state: FSMContext):
@@ -199,24 +357,97 @@ async def process_exam_photo(message: Message, state: FSMContext):
         logger.warning(f"Некорректный ввод фото для экзамена от @{message.from_user.username}")
     await bot.session.close()
 
-@router.callback_query(F.data == "finish_exam")
-async def finish_exam(callback: CallbackQuery, state: FSMContext):
-    data_state = await state.get_data()
-    fio = data_state.get("fio")
-    personal_number = data_state.get("personal_number")
-    military_unit = data_state.get("military_unit")
-    subdivision = data_state.get("subdivision")
-    callsign = data_state.get("callsign")
-    specialty = data_state.get("specialty")
-    contact = data_state.get("contact")
-    video_link = data_state.get("video_link")
-    photo_links = data_state.get("photo_links", [])
-    await add_exam_record(fio, subdivision, military_unit, callsign, specialty, contact, personal_number, video_link, photo_links)
-    await callback.message.edit_text("Экзамен успешно сохранён!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+@router.callback_query(F.data.startswith("select_center_"), StateFilter(AdminResponse.exam_training_center))
+async def process_training_center(callback: CallbackQuery, state: FSMContext, **data):
+    logger.debug(f"Обработка select_center_ в admin_panel.py для @{callback.from_user.username} (ID: {callback.from_user.id})")
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data")
+        await callback.message.edit_text("Ошибка сервера. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+        ]))
+        await callback.answer()
+        return
+    user_id = callback.from_user.id
+    username = callback.from_user.username or "неизвестно"
+    # Проверяем, является ли пользователь админом
+    async with db_pool.acquire() as conn:
+        is_admin = await conn.fetchval("SELECT 1 FROM admins WHERE admin_id = $1", user_id) or user_id in MAIN_ADMIN_IDS
+        if not is_admin:
+            logger.debug(f"Пропускаем select_center_ для не-администратора @{username} (ID: {user_id})")
+            await callback.answer()
+            return  # Пропускаем для не-админов
+    if not hasattr(callback, 'message') or not callback.message:
+        logger.error(f"CallbackQuery без сообщения для @{username} (ID: {user_id})")
+        await callback.answer("Ошибка: сообщение не найдено.", show_alert=True)
+        return
+    training_center_id = int(callback.data.split("_")[-1])
+    await state.update_data(training_center_id=training_center_id)
+    await callback.message.edit_text("Прикрепите видео:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
     ]))
-    logger.info(f"Экзамен сохранён для {fio} пользователем @{callback.from_user.username}")
-    await state.clear()
+    await state.set_state(AdminResponse.exam_video)
+    logger.debug(f"Учебный центр ID {training_center_id} выбран пользователем @{username} (ID: {user_id})")
+    await callback.answer()
+
+@router.callback_query(F.data == "finish_exam")
+async def finish_exam(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data")
+        await callback.message.edit_text("Ошибка сервера. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+        ]))
+        await state.clear()
+        return
+
+    try:
+        state_data = await state.get_data()
+        required_fields = ["fio", "personal_number", "military_unit", "subdivision", "callsign", "specialty", "contact", "training_center_id", "video_link"]
+        missing_fields = [field for field in required_fields if field not in state_data]
+        if missing_fields:
+            logger.error(f"Недостаточно данных для сохранения экзамена: {missing_fields}")
+            await callback.message.edit_text(f"Ошибка: отсутствуют данные ({', '.join(missing_fields)}).", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+            ]))
+            await state.clear()
+            return
+
+        fio = state_data["fio"]
+        personal_number = state_data["personal_number"]
+        military_unit = state_data["military_unit"]
+        subdivision = state_data["subdivision"]
+        callsign = state_data["callsign"]
+        specialty = state_data["specialty"]
+        contact = state_data["contact"]
+        training_center_id = state_data["training_center_id"]
+        video_link = state_data["video_link"]
+        photo_links = state_data.get("photo_links", [])
+
+        exam_id = await add_exam_record(
+            fio=fio,
+            personal_number=personal_number,
+            military_unit=military_unit,
+            subdivision=subdivision,
+            callsign=callsign,
+            specialty=specialty,
+            contact=contact,
+            training_center_id=training_center_id,
+            video_link=video_link,
+            photo_links=json.dumps(photo_links)
+        )
+
+        await callback.message.edit_text(f"Экзамен №{exam_id} успешно добавлен!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+        ]))
+        logger.info(f"Экзамен №{exam_id} добавлен пользователем @{callback.from_user.username}")
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Ошибка сохранения экзамена: {e}")
+        await callback.message.edit_text(f"Ошибка сервера: {str(e)}. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+        ]))
+        await state.clear()
 
 @router.callback_query(F.data == "change_code_word")
 async def change_code_word_prompt(callback: CallbackQuery, state: FSMContext):
@@ -888,7 +1119,7 @@ async def skip_exam_photo(callback: CallbackQuery, state: FSMContext):
             f"Подразделение: {subdivision}\n"
             f"В/Ч: {military_unit}\n"
             f"Позывной: {callsign}\n"
-            f"Специальность: {specialty}\n"
+            f"Направление: {specialty}\n"
             f"Контакт: {contact}\n"
             f"Видео: {video_link}\n"
             f"Фото: {len(photo_links)} шт.")
@@ -962,8 +1193,9 @@ async def export_exams_handler(callback: CallbackQuery, **data):
             'Подразделение': record['subdivision'],
             'В/Ч': record['military_unit'],
             'Позывной': record['callsign'],
-            'Специальность': record['specialty'],
+            'Направление': record['specialty'],
             'Контакт': record['contact'],
+            'УТЦ': record['center_name'] or 'Отсутствует',
             'Видео': record['video_link'] or 'Отсутствует',
             'Фото': ', '.join(photo_links) or 'Отсутствует'
         })

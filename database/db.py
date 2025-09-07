@@ -4,10 +4,12 @@ import json
 from config import DB_CONFIG
 import logging
 import re
-
 logger = logging.getLogger(__name__)
 
 pool = None
+
+def normalize_personal_number(pn):
+    return re.sub(r'[^а-яА-Я0-9]', '', pn.lower())
 
 def get_my_appeals_menu(appeals, page, total_appeals):
     keyboard = []
@@ -51,6 +53,14 @@ async def initialize_db():
 
 async def create_tables():
     async with pool.acquire() as conn:
+        await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS training_centers (
+                        id SERIAL PRIMARY KEY,
+                        code_word TEXT UNIQUE,
+                        center_name TEXT,
+                        chat_link TEXT
+                    )
+                """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS serials (
                 serial TEXT PRIMARY KEY,
@@ -115,27 +125,21 @@ async def create_tables():
             )
         """)
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS exam_records (
-                exam_id SERIAL PRIMARY KEY,
-                fio TEXT,
-                subdivision TEXT,
-                military_unit TEXT,
-                callsign TEXT,
-                specialty TEXT,
-                contact TEXT,
-                personal_number TEXT,
-                video_link TEXT,
-                photo_links TEXT
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS training_centers (
-                id SERIAL PRIMARY KEY,
-                code_word TEXT UNIQUE,
-                center_name TEXT,
-                chat_link TEXT
-            )
-        """)
+                    CREATE TABLE IF NOT EXISTS exam_records (
+                        exam_id SERIAL PRIMARY KEY,
+                        fio TEXT,
+                        subdivision TEXT,
+                        military_unit TEXT,
+                        callsign TEXT,
+                        specialty TEXT,
+                        contact TEXT,
+                        personal_number TEXT,
+                        video_link TEXT,
+                        photo_links TEXT,
+                        training_center_id INTEGER,
+                        FOREIGN KEY (training_center_id) REFERENCES training_centers(id)
+                    )
+                """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_messages (
                 message_id BIGINT,
@@ -152,28 +156,72 @@ async def get_db_pool():
         raise RuntimeError("Database pool not initialized")
     return pool
 
-async def add_exam_record(fio, subdivision, military_unit, callsign, specialty, contact, personal_number, video_link=None, photo_links=None):
+async def add_exam_record(fio, subdivision, military_unit, callsign, specialty, contact, personal_number, training_center_id, video_link=None, photo_links=None):
     async with pool.acquire() as conn:
+        normalized = normalize_personal_number(personal_number)
+        logger.debug(f"Сохраняемый личный номер: {personal_number}, нормализованный: {normalized}")
         exam_id = await conn.fetchval(
-            "INSERT INTO exam_records (fio, subdivision, military_unit, callsign, specialty, contact, personal_number, video_link, photo_links) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING exam_id",
-            fio, subdivision, military_unit, callsign, specialty, contact, personal_number, video_link, json.dumps(photo_links) if photo_links else None
+            "INSERT INTO exam_records (fio, subdivision, military_unit, callsign, specialty, contact, personal_number, training_center_id, video_link, photo_links, normalized) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING exam_id",
+            fio, subdivision, military_unit, callsign, specialty, contact, personal_number, training_center_id, video_link, json.dumps(photo_links) if photo_links else None, normalized
         )
-        logger.info(f"Экзамен №{exam_id} добавлен для {fio}")
+        logger.info(f"Экзамен №{exam_id} добавлен для {fio} с УТЦ ID {training_center_id}")
         return exam_id
 
-async def update_exam_record(exam_id, video_link, photo_links):
+async def update_exam_record(exam_id, video_link=None, photo_links=None):
     async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE exam_records SET video_link = $1, photo_links = $2 WHERE exam_id = $3",
-            video_link, json.dumps(photo_links) if photo_links else None, exam_id
-        )
-        logger.info(f"Экзамен №{exam_id} обновлён с видео и фото")
+        async with conn.transaction():  # Гарантируем коммит транзакции
+            result = await conn.execute("""
+                UPDATE exam_records 
+                SET video_link = $1, photo_links = $2
+                WHERE exam_id = $3
+            """, video_link, json.dumps(photo_links) if photo_links else None, exam_id)
+            logger.debug(f"Обновление записи экзамена ID {exam_id}: video_link={video_link}, photo_links={photo_links}, result={result}")
+        logger.info(f"Запись экзамена ID {exam_id} обновлена с видео {video_link} и фото {photo_links}")
 
 async def get_exam_records():
     async with pool.acquire() as conn:
-        records = await conn.fetch("SELECT * FROM exam_records ORDER BY exam_id DESC")
+        records = await conn.fetch("""
+            SELECT er.*, tc.center_name 
+            FROM exam_records er 
+            LEFT JOIN training_centers tc ON er.training_center_id = tc.id 
+            ORDER BY er.exam_id DESC
+        """)
         logger.info(f"Запрошены записи экзаменов, найдено: {len(records)}")
+        return records
+
+async def get_exam_records_by_personal_number(personal_number):
+    async with pool.acquire() as conn:
+        normalized_personal_number = normalize_personal_number(personal_number)
+        logger.debug(f"Нормализованный личный номер для поиска: {normalized_personal_number}")
+        # Проверяем все записи для отладки
+        all_records = await conn.fetch("""
+            SELECT personal_number, encode(personal_number::bytea, 'escape') AS encoded, normalized 
+            FROM exam_records
+        """)
+        logger.debug(f"Все записи в базе: {[(r['personal_number'], r['encoded'], r['normalized']) for r in all_records]}")
+        # Поиск по числовой части
+        numeric_part = re.sub(r'[^0-9]', '', normalized_personal_number)
+        if numeric_part:
+            logger.debug(f"Поиск по числовой части: {numeric_part}")
+            records = await conn.fetch("""
+                SELECT er.*, tc.center_name 
+                FROM exam_records er 
+                LEFT JOIN training_centers tc ON er.training_center_id = tc.id 
+                WHERE REGEXP_REPLACE(normalized, '[а-яА-Я]', '') = $1
+            """, numeric_part)
+            logger.debug(f"Поиск по числовой части {numeric_part} нашёл: {len(records)} записей")
+            if records:
+                return records
+        # Основной поиск по нормализованному номеру
+        records = await conn.fetch("""
+            SELECT er.*, tc.center_name 
+            FROM exam_records er 
+            LEFT JOIN training_centers tc ON er.training_center_id = tc.id 
+            WHERE normalized = $1
+        """, normalized_personal_number)
+        logger.debug(f"Основной поиск для {normalized_personal_number} нашёл: {len(records)} записей")
+        logger.info(f"Запрошены записи экзаменов по личному номеру {personal_number}, найдено: {len(records)}")
         return records
 
 async def validate_exam_record(fio, personal_number, military_unit, subdivision, specialty, contact):
@@ -284,8 +332,10 @@ async def add_appeal(serial, username, description, media_files, user_id):
                 serial, username, description, json.dumps(media_files), "new", user_id,
                 datetime.now().strftime("%Y-%m-%dT%H:%M")
             )
-            logger.info(f"Заявка №{appeal_id} создана для серийника {serial}")
-            return appeal_id, appeal_count
+    logger.info(f"Заявка №{appeal_id} создана для серийника {serial}")
+    return appeal_id, appeal_count
+
+
 
 async def check_duplicate_appeal(serial, description, user_id):
     async with pool.acquire() as conn:
@@ -341,11 +391,14 @@ async def save_response(appeal_id, response):
 
 async def close_appeal(appeal_id):
     async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE appeals SET status = $1, closed_time = $2 WHERE appeal_id = $3",
-            "processed", datetime.now().strftime("%Y-%m-%dT%H:%M"), appeal_id
-        )
-        logger.info(f"Заявка №{appeal_id} закрыта")
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE appeals SET status = $1, closed_time = $2 WHERE appeal_id = $3",
+                "processed", datetime.now().strftime("%Y-%m-%dT%H:%M"), appeal_id
+            )
+    logger.info(f"Заявка №{appeal_id} закрыта")
+
+
 
 async def delegate_appeal(appeal_id, admin_id, username, current_admin_id=None):
     async with pool.acquire() as conn:

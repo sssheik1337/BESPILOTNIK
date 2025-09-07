@@ -3,19 +3,27 @@ import logging
 from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery, InputMediaPhoto, FSInputFile
 from aiogram.fsm.storage.memory import MemoryStorage
-from config import TOKEN, MAIN_ADMIN_IDS
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
+from config import TOKEN, API_BASE_URL, WEBHOOK_URL, MAIN_ADMIN_IDS
 from handlers import user_handlers, common_handlers, user_exam
 from handlers.admin import serial_history, appeal_actions, admin_panel, defect_management, base_management, overdue_checks, closed_appeals
-from database.db import initialize_db, close_db, get_open_appeals, get_appeal, close_appeal, get_db_pool
-from datetime import datetime, timedelta
+from database.db import initialize_db, close_db, get_open_appeals, close_appeal
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.client.session.aiohttp import AiohttpSession
+from datetime import datetime, timedelta
 
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("C:\\Users\\hrome\\PycharmProjects\\BESPILOTNIK\\bot_err.log")
+    ]
 )
 logger = logging.getLogger(__name__)
+
+db_lock = asyncio.Lock()
 
 class DatabaseMiddleware(BaseMiddleware):
     def __init__(self, pool):
@@ -35,6 +43,10 @@ class SerialCheckMiddleware(BaseMiddleware):
             logger.debug("Нет внутреннего события в Update, пропускаем")
             return await handler(update, data)
 
+        if not hasattr(event, 'chat'):
+            logger.debug(f"Пропускаем событие {type(event).__name__} без чата")
+            return await handler(update, data)
+
         user_id = None
         username = "неизвестно"
         if hasattr(event, 'from_user') and event.from_user:
@@ -45,152 +57,144 @@ class SerialCheckMiddleware(BaseMiddleware):
             logger.debug("Не удалось определить user_id, пропускаем событие")
             return await handler(update, data)
 
-        logger.debug(f"SerialCheckMiddleware: Обработка события {type(event).__name__}, текст/данные: {getattr(event, 'text', getattr(event, 'data', None))}")
         state = data["state"]
-        data_state = await state.get_data()
-        logger.debug(f"SerialCheckMiddleware: Состояние FSM: {data_state}")
         current_state = await state.get_state()
         logger.debug(f"SerialCheckMiddleware: Текущее состояние FSM: {current_state}")
 
-        is_admin = False
-        is_employee = False
-        async with data["db_pool"].acquire() as conn:
-            admin = await conn.fetchrow("SELECT admin_id FROM admins WHERE admin_id = $1", user_id)
-            logger.debug(f"Проверка админа для ID {user_id}: {admin}")
-            if admin or user_id in MAIN_ADMIN_IDS:
-                is_admin = True
-            employee = await conn.fetchrow("SELECT user_id FROM users WHERE user_id = $1", user_id)
-            logger.debug(f"Проверка сотрудника для ID {user_id}: {employee}")
-            if employee:
-                is_employee = True
-
-        if is_admin or is_employee:
-            logger.debug(f"Пропускаем проверку serial для {'администратора' if is_admin else 'сотрудника'} @{username} (ID: {user_id})")
+        is_fsm_state = current_state and (
+            current_state.startswith("UserState:") or
+            current_state.startswith("UserExam:") or
+            current_state.startswith("AppealForm:") or
+            current_state.startswith("AdminResponse:") or
+            current_state.startswith("BaseManagement:")
+        )
+        if is_fsm_state:
+            logger.debug(f"Пропускаем сообщение в состоянии {current_state} для пользователя @{username} (ID: {user_id})")
             return await handler(update, data)
 
-        is_confirm_auto_delete = isinstance(event, CallbackQuery) and event.data == "confirm_auto_delete"
-        is_start_command = isinstance(event, Message) and event.text and event.text.startswith("/start")
-        is_waiting_for_serial = current_state == "UserState:waiting_for_serial"
-        is_request_support = isinstance(event, CallbackQuery) and event.data == "request_support"
-        is_enroll_training = isinstance(event, CallbackQuery) and event.data == "enroll_training"
-        is_user_exam_state = current_state and current_state.startswith("UserExam:")
-        if is_start_command or is_confirm_auto_delete or is_waiting_for_serial or is_request_support or is_enroll_training or is_user_exam_state:
-            logger.debug(f"Пропускаем {'/start' if is_start_command else 'confirm_auto_delete' if is_confirm_auto_delete else 'waiting_for_serial' if is_waiting_for_serial else 'request_support' if is_request_support else 'enroll_training' if is_enroll_training else 'user_exam_state'} для пользователя @{username} (ID: {user_id})")
-            return await handler(update, data)
-        if "serial" not in data_state:
-            logger.warning(f"Попытка доступа без серийного номера от пользователя @{username} (ID: {user_id})")
-            chat_id = event.chat.id if hasattr(event, 'chat') else (event.message.chat.id if hasattr(event, 'message') else None)
-            if chat_id is None:
-                logger.error("Не удалось определить chat_id для события")
+        if isinstance(event, Message):
+            if event.text and event.text.startswith('/'):
+                logger.debug(f"Обработка команды '{event.text}' от @{username} (ID: {user_id}) в чате типа {event.chat.type}")
                 return await handler(update, data)
-            try:
-                media = [
-                    InputMediaPhoto(media=FSInputFile("/data/start1.jpg")),
-                    InputMediaPhoto(media=FSInputFile("/data/start2.jpg")),
-                    InputMediaPhoto(media=FSInputFile("/data/start3.jpg"))
-                ]
-                text = "⚠️В целях безопасности включите автоудаление сообщений через сутки и введите серийный номер заново.⚠️"
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="Я ВКЛЮЧИЛ АВТОУДАЛЕНИЕ", callback_data="confirm_auto_delete")]
-                ])
-                if isinstance(event, Message):
-                    logger.debug(f"Отправка медиа для Message от @{username} (ID: {user_id})")
-                    await bot.send_media_group(chat_id=chat_id, media=media)
-                    logger.debug(f"Медиа отправлены для Message от @{username} (ID: {user_id})")
-                    await asyncio.sleep(0.5)  # Задержка для гарантии порядка
-                    await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
-                    logger.debug(f"Сообщение об автоудалении отправлено для Message от @{username} (ID: {user_id})")
-                elif isinstance(event, CallbackQuery):
-                    logger.debug(f"Отправка медиа для CallbackQuery от @{username} (ID: {user_id})")
-                    await bot.send_media_group(chat_id=chat_id, media=media)
-                    logger.debug(f"Медиа отправлены для CallbackQuery от @{username} (ID: {user_id})")
-                    await asyncio.sleep(0.5)  # Задержка для гарантии порядка
-                    await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
-                    logger.debug(f"Сообщение об автоудалении отправлено для CallbackQuery от @{username} (ID: {user_id})")
-            except (TelegramBadRequest, TelegramForbiddenError, FileNotFoundError) as e:
-                logger.error(f"Ошибка отправки сообщения об автоудалении для пользователя @{username} (ID: {user_id}): {str(e)}")
-                if isinstance(event, Message):
-                    await bot.send_message(chat_id=chat_id, text="Ошибка. Попробуйте снова.")
-                elif isinstance(event, CallbackQuery):
-                    await event.message.edit_text("Ошибка. Попробуйте снова.")
+            logger.debug(f"Игнорируем сообщение '{event.text}' от @{username} (ID: {user_id}) в чате типа {event.chat.type}, не является командой")
             return
-        logger.debug(f"Пользователь @{username} (ID: {user_id}) прошёл проверку, передаём управление хэндлеру")
+
+        if isinstance(event, CallbackQuery):
+            logger.debug(f"Пропускаем CallbackQuery для пользователя @{username} (ID: {user_id}) в чате типа {event.chat.type}")
+            return await handler(update, data)
+
+        logger.debug(f"Игнорируем событие {type(event).__name__} от @{username} (ID: {user_id}) в чате типа {event.chat.type}")
         return await handler(update, data)
 
 async def check_overdue_appeals(bot: Bot):
     while True:
         try:
-            appeals, _ = await get_open_appeals(page=0)
-            for appeal in appeals:
-                created_time = datetime.strptime(appeal['created_time'], "%Y-%m-%dT%H:%M")
-                if (datetime.now() - created_time).days > 30 and appeal['status'] == 'new':
-                    await close_appeal(appeal['appeal_id'])
-                    text = f"Заявка №{appeal['appeal_id']} автоматически закрыта по истечении 30 дней."
-                    try:
-                        await bot.send_message(
-                            chat_id=appeal["user_id"],
-                            text=text,
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-                            ])
-                        )
-                        logger.info(f"Уведомление о закрытии заявки №{appeal['appeal_id']} отправлено пользователю ID {appeal['user_id']}")
-                    except Exception as e:
-                        logger.error(f"Ошибка отправки уведомления пользователю ID {appeal['user_id']} для заявки №{appeal['appeal_id']}: {e}")
-                    if appeal['admin_id']:
+            async with db_lock:
+                result = await get_open_appeals(page=0)
+                if result is None:
+                    logger.warning("get_open_appeals вернул None, пропускаем итерацию")
+                    await asyncio.sleep(3600)
+                    continue
+                appeals, _ = result
+                for appeal in appeals:
+                    created_time = datetime.strptime(appeal['created_time'], "%Y-%m-%dT%H:%M")
+                    if (datetime.now() - created_time).days > 30 and appeal['status'] == 'new':
+                        await close_appeal(appeal['appeal_id'])
+                        text = f"Заявка №{appeal['appeal_id']} автоматически закрыта по истечении 30 дней."
                         try:
                             await bot.send_message(
-                                chat_id=appeal['admin_id'],
+                                chat_id=appeal["user_id"],
                                 text=text,
                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                     [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
                                 ])
                             )
-                            logger.info(f"Уведомление о закрытии заявки №{appeal['appeal_id']} отправлено админу ID {appeal['admin_id']}")
+                            logger.info(f"Уведомление о закрытии заявки №{appeal['appeal_id']} отправлено пользователю ID {appeal['user_id']}")
                         except Exception as e:
-                            logger.error(f"Ошибка отправки уведомления админу ID {appeal['admin_id']} для заявки №{appeal['appeal_id']}: {e}")
-                    for main_admin_id in MAIN_ADMIN_IDS:
-                        if not appeal['admin_id'] or main_admin_id != appeal['admin_id']:
+                            logger.error(f"Ошибка отправки уведомления пользователю ID {appeal['user_id']} для заявки №{appeal['appeal_id']}: {e}")
+                        if appeal['admin_id']:
                             try:
                                 await bot.send_message(
-                                    chat_id=main_admin_id,
+                                    chat_id=appeal['admin_id'],
                                     text=text,
                                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                         [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
                                     ])
                                 )
-                                logger.info(f"Уведомление о закрытии заявки №{appeal['appeal_id']} отправлено главному админу ID {main_admin_id}")
+                                logger.info(f"Уведомление о закрытии заявки №{appeal['appeal_id']} отправлено админу ID {appeal['admin_id']}")
                             except Exception as e:
-                                logger.error(f"Ошибка отправки уведомления главному админу ID {main_admin_id} для заявки №{appeal['appeal_id']}: {e}")
-                    logger.info(f"Заявка №{appeal['appeal_id']} автоматически закрыта")
+                                logger.error(f"Ошибка отправки уведомления админу ID {appeal['admin_id']} для заявки №{appeal['appeal_id']}: {e}")
+                        for main_admin_id in MAIN_ADMIN_IDS:
+                            if not appeal['admin_id'] or main_admin_id != appeal['admin_id']:
+                                try:
+                                    await bot.send_message(
+                                        chat_id=main_admin_id,
+                                        text=text,
+                                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+                                        ])
+                                    )
+                                    logger.info(f"Уведомление о закрытии заявки №{appeal['appeal_id']} отправлено главному админу ID {main_admin_id}")
+                                except Exception as e:
+                                    logger.error(f"Ошибка отправки уведомления главному админу ID {main_admin_id} для заявки №{appeal['appeal_id']}: {e}")
+                        logger.info(f"Заявка №{appeal['appeal_id']} автоматически закрыта")
             await asyncio.sleep(3600)
         except Exception as e:
             logger.error(f"Ошибка в шедулере просроченных заявок: {e}")
             await asyncio.sleep(3600)
 
-async def main():
-    bot = Bot(token=TOKEN)
-    dp = Dispatcher(storage=MemoryStorage())
+async def handle_root(request):
+    return web.Response(status=404)
+
+async def on_startup(app):
+    bot = app["bot"]
+    dp = app["dp"]
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_webhook(WEBHOOK_URL)
+    logger.info(f"Webhook установлен: {WEBHOOK_URL}")
     pool = await initialize_db()
     dp.update.outer_middleware.register(DatabaseMiddleware(pool))
     dp.update.outer_middleware.register(SerialCheckMiddleware())
+    asyncio.create_task(check_overdue_appeals(bot))
+
+async def on_shutdown(app):
+    bot = app["bot"]
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.session.close()
+    await close_db()
+    logger.info("Webhook удалён, сессия закрыта")
+
+def main():
+    global bot, dp
+    bot = Bot(token=TOKEN, session=AiohttpSession(), base_url=API_BASE_URL.format(token=TOKEN))
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(admin_panel.router)
     dp.include_router(user_handlers.router)
     dp.include_router(common_handlers.router)
     dp.include_router(user_exam.router)
     dp.include_router(serial_history.router)
     dp.include_router(appeal_actions.router)
-    dp.include_router(admin_panel.router)
     dp.include_router(defect_management.router)
     dp.include_router(base_management.router)
     dp.include_router(overdue_checks.router)
     dp.include_router(closed_appeals.router)
-    logger.info("Бот запущен")
-    asyncio.create_task(check_overdue_appeals(bot))
-    try:
-        await dp.start_polling(bot)
-    finally:
-        await close_db()
-        await bot.session.close()
+
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+
+    app = web.Application()
+    app["bot"] = bot
+    app["dp"] = dp
+    app.router.add_get("/", handle_root)
+    webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    webhook_requests_handler.register(app, path="/webhook")
+    setup_application(app, dp, bot=bot)
+
+    logger.info("Бот запущен в режиме Webhook")
+    web.run_app(app, host="0.0.0.0", port=8000)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from aiogram.client.session.aiohttp import AiohttpSession
+    from aiohttp import web
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    main()

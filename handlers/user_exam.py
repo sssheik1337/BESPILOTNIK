@@ -4,7 +4,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import StateFilter
 from database.db import get_code_word, get_training_centers, add_exam_record, validate_exam_record, update_exam_record
-from config import TOKEN
+from config import MAIN_ADMIN_IDS
 import logging
 
 logger = logging.getLogger(__name__)
@@ -31,26 +31,32 @@ async def enroll_training_prompt(callback: CallbackQuery, state: FSMContext):
     logger.debug(f"Пользователь @{callback.from_user.username} (ID: {callback.from_user.id}) запросил запись на обучение")
 
 @router.message(StateFilter(UserExam.code_word))
-async def process_code_word(message: Message, state: FSMContext, bot: Bot):
+async def process_code_word(message: Message, state: FSMContext, **data):
     code_word = message.text.strip()
-    db_code_word = await get_code_word()
-    if code_word.lower() != db_code_word.lower():
-        await message.answer("Некорректное кодовое слово. Попробуйте снова:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data")
+        await message.answer("Ошибка сервера. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
         ]))
-        logger.warning(f"Некорректное кодовое слово {code_word} от @{message.from_user.username} (ID: {message.from_user.id})")
         return
+    async with db_pool.acquire() as conn:
+        db_code_word = await conn.fetchval("SELECT code_word FROM training_centers WHERE code_word = $1", code_word)
+        logger.debug(f"Запрошено кодовое слово: {db_code_word}")
+        if not db_code_word:
+            await message.answer("Неверное кодовое слово. Попробуйте снова:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+            ]))
+            logger.warning(f"Неверное кодовое слово '{code_word}' от пользователя @{message.from_user.username} (ID: {message.from_user.id})")
+            return
     await state.update_data(code_word=code_word)
-    await message.answer("Введите ФИО:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
+    await message.answer("⚠️ Внимание!\n"
+                         "Продолжая использовать бот, вы автоматически соглашаетесь с обработкой ваших персональных данных.\n"
+                         "Введите ФИО:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
     ]))
     await state.set_state(UserExam.fio)
-    logger.debug(f"Кодовое слово подтверждено для @{message.from_user.username} (ID: {message.from_user.id})")
-    try:
-        await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
-        logger.debug(f"Сообщение с кодовым словом удалено для @{message.from_user.username} (ID: {message.from_user.id})")
-    except Exception as e:
-        logger.error(f"Ошибка удаления сообщения с кодовым словом для @{message.from_user.username}: {str(e)}")
+    logger.debug(f"Кодовое слово {code_word} принято от @{message.from_user.username} (ID: {message.from_user.id})")
 
 @router.message(StateFilter(UserExam.fio))
 async def process_fio(message: Message, state: FSMContext, bot: Bot):
@@ -116,7 +122,7 @@ async def process_subdivision(message: Message, state: FSMContext, bot: Bot):
 async def process_callsign(message: Message, state: FSMContext, bot: Bot):
     callsign = message.text.strip()
     await state.update_data(callsign=callsign)
-    await message.answer("Введите специальность:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    await message.answer("Введите направление:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
     ]))
     await state.set_state(UserExam.specialty)
@@ -135,12 +141,11 @@ async def process_specialty(message: Message, state: FSMContext, bot: Bot):
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
     ]))
     await state.set_state(UserExam.contact)
-    logger.debug(f"Специальность {specialty} принята от @{message.from_user.username} (ID: {message.from_user.id})")
+    logger.debug(f"Направление {specialty} принята от @{message.from_user.username} (ID: {message.from_user.id})")
     try:
         await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
-        logger.debug(f"Сообщение со специальностью удалено для @{message.from_user.username} (ID: {message.from_user.id})")
     except Exception as e:
-        logger.error(f"Ошибка удаления сообщения со специальностью для @{message.from_user.username}: {str(e)}")
+        logger.error(f"Ошибка удаления сообщения с направлением для @{message.from_user.username}: {str(e)}")
 
 @router.message(StateFilter(UserExam.contact))
 async def process_contact(message: Message, state: FSMContext, bot: Bot):
@@ -173,16 +178,27 @@ async def process_contact(message: Message, state: FSMContext, bot: Bot):
     except Exception as e:
         logger.error(f"Ошибка удаления сообщения с контактом для @{message.from_user.username}: {str(e)}")
 
-@router.callback_query(F.data.startswith("select_center_"))
+@router.callback_query(F.data.startswith("select_center_"), StateFilter(UserExam.training_center))
 async def process_training_center(callback: CallbackQuery, state: FSMContext, **data):
     db_pool = data.get("db_pool")
-    bot = Bot(token=TOKEN)
     if not db_pool:
         logger.error("db_pool отсутствует в data")
         await callback.message.edit_text("Ошибка сервера. Попробуйте позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
         ]))
+        await callback.answer()
         return
+
+    user_id = callback.from_user.id
+    username = callback.from_user.username or "неизвестно"
+    # Проверяем, является ли пользователь админом
+    async with db_pool.acquire() as conn:
+        is_admin = await conn.fetchval("SELECT 1 FROM admins WHERE admin_id = $1", user_id) or user_id in MAIN_ADMIN_IDS
+        if is_admin:
+            logger.debug(f"Пропускаем select_center_ для администратора @{username} (ID: {user_id})")
+            await callback.answer()
+            return  # Админы обрабатываются в admin_panel.py
+
     center_id = int(callback.data.split("_")[-1])
     data_state = await state.get_data()
     fio = data_state.get("fio")
@@ -198,22 +214,22 @@ async def process_training_center(callback: CallbackQuery, state: FSMContext, **
             await callback.message.edit_text("УТЦ не найден.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
             ]))
-            logger.warning(f"УТЦ ID {center_id} не найден для @{callback.from_user.username}")
+            logger.warning(f"УТЦ ID {center_id} не найден для @{username}")
+            await callback.answer()
             return
-    exam_id = await validate_exam_record(fio, personal_number, military_unit, subdivision, specialty, contact)
-    if exam_id:
-        await update_exam_record(exam_id, None, None)  # Пользователь не добавляет медиа, просто обновляем запись
-    else:
-        await add_exam_record(fio, subdivision, military_unit, callsign, specialty, contact, personal_number)
-    await callback.message.edit_text(
-        f"Вы успешно записаны на обучение в {center['center_name']}!\n"
-        f"Присоединяйтесь к чату: {center['chat_link']}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Перейти в чат", url=center['chat_link'])],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-        ])
-    )
-    logger.info(f"Пользователь @{callback.from_user.username} (ID: {callback.from_user.id}) записан на обучение в {center['center_name']}")
+        exam_id = await validate_exam_record(fio, personal_number, military_unit, subdivision, specialty, contact)
+        if exam_id:
+            await update_exam_record(exam_id, None, None)  # Пользователь не добавляет медиа
+        else:
+            await add_exam_record(fio, subdivision, military_unit, callsign, specialty, contact, personal_number, center_id)
+        await callback.message.edit_text(
+            f"Вы успешно записаны на обучение в {center['center_name']}!\n"
+            f"Присоединяйтесь к чату: {center['chat_link']}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Перейти в чат", url=center['chat_link'])],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+            ])
+        )
+        logger.info(f"Пользователь @{username} (ID: {user_id}) записан на обучение в {center['center_name']} (ID: {center_id})")
     await state.clear()
     await callback.answer()
-    await bot.session.close()
