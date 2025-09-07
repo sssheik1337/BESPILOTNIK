@@ -148,6 +148,12 @@ async def create_tables():
                 PRIMARY KEY (message_id, chat_id)
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS manuals (
+                category TEXT PRIMARY KEY,
+                file_id TEXT
+            )
+        """)
     logger.info("Таблицы базы данных созданы или проверены")
 
 async def get_db_pool():
@@ -568,3 +574,26 @@ async def get_defect_reports(serial=None, serial_from=None, serial_to=None):
             reports = await conn.fetch("SELECT * FROM defect_reports ORDER BY report_date DESC")
         logger.info(f"Запрошены отчёты о неисправности, найдено: {len(reports)}")
         return reports
+
+async def set_manual_file(category, file_id):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO manuals (category, file_id)
+            VALUES ($1, $2)
+            ON CONFLICT (category) DO UPDATE SET file_id = EXCLUDED.file_id
+            """,
+            category, file_id
+        )
+        logger.info(f"Файл руководства '{category}' обновлён")
+
+async def get_manual_file(category):
+    async with pool.acquire() as conn:
+        file_id = await conn.fetchval(
+            "SELECT file_id FROM manuals WHERE category = $1",
+            category
+        )
+        logger.debug(
+            f"Запрошен файл руководства '{category}': {'найден' if file_id else 'отсутствует'}"
+        )
+        return file_id
