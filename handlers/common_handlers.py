@@ -1,6 +1,6 @@
 from aiogram import Router, F, Bot
 from aiogram.types import Message, ErrorEvent, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, FSInputFile
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from keyboards.inline import get_user_menu, get_admin_menu, get_manuals_menu
@@ -28,13 +28,17 @@ async def clear_serial_state(user_id, state: FSMContext, delay=12*3600):
         await state.clear()
         logger.info(f"Состояние серийного номера очищено для пользователя ID {user_id}")
 
-@router.message(Command(commands=["start"]))
+@router.message(CommandStart())
 async def start_command(message: Message, state: FSMContext, bot: Bot, **data):
     user_id = message.from_user.id
     username = message.from_user.username or "неизвестно"
     logger.info(f"Получена команда /start от пользователя @{username} (ID: {user_id})")
     logger.debug(f"Состояние FSM перед обработкой /start: {await state.get_data()}")
-    db_pool = data["db_pool"]
+    db_pool = data.get("db_pool")
+    if db_pool is None:
+        logger.error("Database connection pool is missing in handler data")
+        await message.answer("Ошибка подключения к базе данных. Попробуйте позже.")
+        return
     is_admin = False
     is_employee = False
     async with db_pool.acquire() as conn:
