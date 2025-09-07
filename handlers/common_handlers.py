@@ -1,15 +1,15 @@
 from aiogram import Router, F, Bot
 from aiogram.types import Message, ErrorEvent, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, FSInputFile
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from keyboards.inline import get_user_menu, get_admin_menu
+from keyboards.inline import get_user_menu, get_admin_menu, get_manuals_menu
 from config import MAIN_ADMIN_IDS
 import logging
 import traceback
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from utils.validators import validate_serial
-from database.db import get_serial_history
+from database.db import get_serial_history, get_manual_file
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -28,13 +28,17 @@ async def clear_serial_state(user_id, state: FSMContext, delay=12*3600):
         await state.clear()
         logger.info(f"Состояние серийного номера очищено для пользователя ID {user_id}")
 
-@router.message(Command(commands=["start"]))
+@router.message(CommandStart())
 async def start_command(message: Message, state: FSMContext, bot: Bot, **data):
     user_id = message.from_user.id
     username = message.from_user.username or "неизвестно"
     logger.info(f"Получена команда /start от пользователя @{username} (ID: {user_id})")
     logger.debug(f"Состояние FSM перед обработкой /start: {await state.get_data()}")
-    db_pool = data["db_pool"]
+    db_pool = data.get("db_pool")
+    if db_pool is None:
+        logger.error("Database connection pool is missing in handler data")
+        await message.answer("Ошибка подключения к базе данных. Попробуйте позже.")
+        return
     is_admin = False
     is_employee = False
     async with db_pool.acquire() as conn:
@@ -89,7 +93,8 @@ async def confirm_auto_delete(callback: CallbackQuery, state: FSMContext):
         "Выберите действие:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Запрос тех.поддержки", callback_data="request_support")],
-            [InlineKeyboardButton(text="Запись на обучение", callback_data="enroll_training")]
+            [InlineKeyboardButton(text="Запись на обучение", callback_data="enroll_training")],
+            [InlineKeyboardButton(text="Руководство по настройке", callback_data="setup_manual")]
         ])
     )
     await state.set_state(None)
@@ -103,8 +108,21 @@ async def request_support(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Введите серийный номер:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
     ]))
+    await state.update_data(scenario="support")
     await state.set_state(UserState.waiting_for_serial)
     logger.debug(f"Пользователь @{username} (ID: {user_id}) выбрал запрос техподдержки")
+    await callback.answer()
+
+@router.callback_query(F.data == "setup_manual")
+async def setup_manual(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    username = callback.from_user.username or "неизвестно"
+    await callback.message.edit_text("Введите серийный номер:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
+    ]))
+    await state.update_data(scenario="manual")
+    await state.set_state(UserState.waiting_for_serial)
+    logger.debug(f"Пользователь @{username} (ID: {user_id}) выбрал руководство по настройке")
     await callback.answer()
 
 @router.callback_query(F.data == "select_scenario")
@@ -113,7 +131,8 @@ async def select_scenario(callback: CallbackQuery, state: FSMContext):
         "Выберите действие:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Запрос тех.поддержки", callback_data="request_support")],
-            [InlineKeyboardButton(text="Запись на обучение", callback_data="enroll_training")]
+            [InlineKeyboardButton(text="Запись на обучение", callback_data="enroll_training")],
+            [InlineKeyboardButton(text="Руководство по настройке", callback_data="setup_manual")]
         ])
     )
     await state.set_state(None)
@@ -143,12 +162,17 @@ async def process_serial(message: Message, state: FSMContext, **data):
         logger.warning(f"Серийный номер {serial} не найден для @{username}")
         return
     await state.update_data(serial=serial)
+    data_state = await state.get_data()
+    scenario = data_state.get("scenario")
     await state.set_state(UserState.menu)
     try:
         await message.delete()
     except TelegramBadRequest as e:
         logger.error(f"Ошибка удаления сообщения от @{username} (ID: {user_id}): {str(e)}")
-    await message.answer("Добро пожаловать!", reply_markup=get_user_menu())
+    if scenario == "manual":
+        await message.answer("Выберите руководство:", reply_markup=get_manuals_menu())
+    else:
+        await message.answer("Добро пожаловать!", reply_markup=get_user_menu())
     logger.info(f"Серийный номер {serial} сохранён в состоянии для пользователя ID {user_id}")
     asyncio.create_task(clear_serial_state(user_id, state))
 
@@ -226,6 +250,30 @@ async def return_to_main_menu(callback: CallbackQuery, state: FSMContext, bot: B
                     chat_id=callback.message.chat.id,
                     text="Ошибка. Попробуйте снова."
                 )
+    await callback.answer()
+
+@router.callback_query(F.data == "manuals")
+async def manuals_menu(callback: CallbackQuery):
+    await callback.message.delete()
+    await callback.message.answer("Выберите руководство:", reply_markup=get_manuals_menu())
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("manual_"))
+async def send_manual(callback: CallbackQuery):
+    mapping = {
+        "manual_remote": "remote",
+        "manual_erlc": "erlc",
+        "manual_nsu": "nsu",
+        "manual_drone": "drone",
+    }
+    category = mapping.get(callback.data)
+    file_id = await get_manual_file(category)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manuals")]])
+    await callback.message.delete()
+    if file_id:
+        await callback.message.answer_document(file_id, reply_markup=keyboard)
+    else:
+        await callback.message.answer("Файл отсутствует.", reply_markup=keyboard)
     await callback.answer()
 
 @router.errors()
