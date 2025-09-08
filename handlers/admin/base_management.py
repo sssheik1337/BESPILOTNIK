@@ -11,6 +11,7 @@ import logging
 from aiogram.exceptions import TelegramBadRequest
 from io import BytesIO
 import pandas as pd
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,8 @@ async def process_import(message: Message, state: FSMContext, **data):
     status_message = await message.answer("Импорт начат, пожалуйста, подождите...")
     file = await message.bot.get_file(message.document.file_id)
     file_io = await message.bot.download_file(file.file_path)
+    if hasattr(file_io, "seek"):
+        file_io.seek(0)
     result, error, invalid_file = await import_serials(file_io, db_pool)
     await status_message.delete()
     if error:

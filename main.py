@@ -7,7 +7,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 from config import TOKEN, API_BASE_URL, WEBHOOK_URL, MAIN_ADMIN_IDS
 from handlers import user_handlers, common_handlers, user_exam
-from handlers.admin import serial_history, appeal_actions, admin_panel, defect_management, base_management, overdue_checks, closed_appeals
+from handlers.admin import serial_history, appeal_actions, admin_panel, defect_management, base_management, overdue_checks, closed_appeals, manuals_management
 from database.db import initialize_db, close_db, get_open_appeals, close_appeal
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -178,6 +178,7 @@ def main():
     dp.include_router(base_management.router)
     dp.include_router(overdue_checks.router)
     dp.include_router(closed_appeals.router)
+    dp.include_router(manuals_management.router)
 
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)

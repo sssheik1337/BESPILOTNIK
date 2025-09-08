@@ -4,6 +4,7 @@ from io import BytesIO
 from database.db import add_serial
 from datetime import datetime
 import logging
+from zipfile import BadZipFile
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,9 @@ def validate_serial(serial):
 
 async def import_serials(file_io, db_pool):
     try:
-        df = pd.read_excel(file_io)
+        if hasattr(file_io, "seek"):
+            file_io.seek(0)
+        df = pd.read_excel(file_io, engine="openpyxl")
         if 'Serial' not in df.columns:
             logger.error("Отсутствует столбец 'Serial' в загруженном файле")
             return None, "Файл должен содержать столбец 'Serial'.", None
@@ -66,6 +69,9 @@ async def import_serials(file_io, db_pool):
         logger.info(
             f"Импорт завершён: добавлено {result['added']}, пропущено {result['skipped']}, невалидных {len(result['invalid'])}")
         return result, None, invalid_file
+    except BadZipFile:
+        logger.error("Повреждённый или неподдерживаемый файл Excel")
+        return None, "Файл повреждён или имеет неверный формат XLSX.", None
     except Exception as e:
         logger.error(f"Ошибка при импорте серийных номеров: {str(e)}")
         return None, f"Ошибка при обработке файла: {str(e)}", None

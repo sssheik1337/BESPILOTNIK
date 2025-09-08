@@ -16,6 +16,17 @@ def get_user_menu():
     logger.debug("Создана клавиатура для пользовательского меню")
     return keyboard
 
+def get_manuals_menu():
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Настройка пульта", callback_data="manual_remote")],
+        [InlineKeyboardButton(text="Прошивка ЕРЛС", callback_data="manual_erlc")],
+        [InlineKeyboardButton(text="Настройка НСУ", callback_data="manual_nsu")],
+        [InlineKeyboardButton(text="Руководство по дрону", callback_data="manual_drone")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+    ])
+    logger.debug("Создана клавиатура меню руководств")
+    return keyboard
+
 def get_exam_menu():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Принять экзамен", callback_data="take_exam")],
@@ -137,6 +148,7 @@ def get_admin_panel_menu():
         [InlineKeyboardButton(text="👥 Проверить заявки сотрудников", callback_data="check_employee_appeals")],
         [InlineKeyboardButton(text="📊 Статистика сотрудников", callback_data="stats")],
         [InlineKeyboardButton(text="⚙️ Управление базой", callback_data="manage_base")],
+        [InlineKeyboardButton(text="📚 Руководства", callback_data="manage_manuals")],
         [InlineKeyboardButton(text="👤 Добавить сотрудника", callback_data="add_employee")],
         [InlineKeyboardButton(text="📢 Добавить канал/группу", callback_data="add_channel")],
         [InlineKeyboardButton(text="🗑 Удалить канал/группу", callback_data="remove_channel")],
@@ -196,6 +208,15 @@ def get_defect_status_menu(serial):
         [InlineKeyboardButton(text="Возврат", callback_data=f"defect_status_vozvrat_{serial}")],
         [InlineKeyboardButton(text="Замена", callback_data=f"defect_status_zamena_{serial}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+    ])
+
+def get_manuals_admin_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Настройка пульта", callback_data="upload_manual_remote")],
+        [InlineKeyboardButton(text="Прошивка ЕРЛС", callback_data="upload_manual_erlc")],
+        [InlineKeyboardButton(text="Настройка НСУ", callback_data="upload_manual_nsu")],
+        [InlineKeyboardButton(text="Руководство по дрону", callback_data="upload_manual_drone")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]
     ])
 
 def get_employee_list_menu(admins):
