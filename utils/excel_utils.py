@@ -1,7 +1,6 @@
 import pandas as pd
 import re
 from io import BytesIO
-from database.db import add_serial
 from datetime import datetime
 import logging
 from zipfile import BadZipFile
@@ -10,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 def validate_serial(serial):
-    return bool(re.match(r'^[A-Za-z0-9]{6,20}$', str(serial)))
+    return bool(re.match(r"^[A-Za-z0-9]{6,20}$", str(serial)))
 
 
 async def import_serials(file_io, db_pool):
@@ -18,30 +17,30 @@ async def import_serials(file_io, db_pool):
         if hasattr(file_io, "seek"):
             file_io.seek(0)
         df = pd.read_excel(file_io, engine="openpyxl")
-        if 'Serial' not in df.columns:
+        if "Serial" not in df.columns:
             logger.error("Отсутствует столбец 'Serial' в загруженном файле")
             return None, "Файл должен содержать столбец 'Serial'.", None
 
-        serials = df['Serial'].dropna().astype(str).tolist()
+        serials = df["Serial"].dropna().astype(str).tolist()
 
-        result = {'added': 0, 'skipped': 0, 'invalid': []}
+        result = {"added": 0, "skipped": 0, "invalid": []}
         existing_serials = set()
 
         async with db_pool.acquire() as conn:
             rows = await conn.fetch("SELECT serial FROM serials")
-            existing_serials.update(row['serial'] for row in rows)
+            existing_serials.update(row["serial"] for row in rows)
 
             valid_serials = []
             for i, serial in enumerate(serials):
                 if serial in existing_serials:
                     logger.info(f"Серийный номер {serial} уже существует, пропущен")
-                    result['skipped'] += 1
+                    result["skipped"] += 1
                     continue
                 if validate_serial(serial):
                     valid_serials.append(serial)
                 else:
                     logger.warning(f"Невалидный серийный номер {serial}")
-                    result['invalid'].append(serial)
+                    result["invalid"].append(serial)
 
                 if (i + 1) % 100 == 0 or i == len(serials) - 1:
                     logger.info(f"Обработано {i + 1} серийных номеров")
@@ -49,25 +48,28 @@ async def import_serials(file_io, db_pool):
             if valid_serials:
                 await conn.executemany(
                     "INSERT INTO serials (serial, appeal_count) VALUES ($1, 0) ON CONFLICT DO NOTHING",
-                    [(serial,) for serial in valid_serials]
+                    [(serial,) for serial in valid_serials],
                 )
-                result['added'] = len(valid_serials)
+                result["added"] = len(valid_serials)
                 for serial in valid_serials:
                     logger.info(f"Добавлен серийный номер {serial}")
                     existing_serials.add(serial)
 
         # Создаём Excel-файл с невалидными номерами, если они есть
         invalid_file = None
-        if result['invalid']:
-            invalid_df = pd.DataFrame({'Invalid Serial': result['invalid']})
+        if result["invalid"]:
+            invalid_df = pd.DataFrame({"Invalid Serial": result["invalid"]})
             output = BytesIO()
             invalid_df.to_excel(output, index=False)
             output.seek(0)
             invalid_file = output
-            logger.info(f"Создан Excel-файл с {len(result['invalid'])} невалидными номерами")
+            logger.info(
+                f"Создан Excel-файл с {len(result['invalid'])} невалидными номерами"
+            )
 
         logger.info(
-            f"Импорт завершён: добавлено {result['added']}, пропущено {result['skipped']}, невалидных {len(result['invalid'])}")
+            f"Импорт завершён: добавлено {result['added']}, пропущено {result['skipped']}, невалидных {len(result['invalid'])}"
+        )
         return result, None, invalid_file
     except BadZipFile:
         logger.error("Повреждённый или неподдерживаемый файл Excel")
@@ -88,42 +90,50 @@ async def export_serials(db_pool):
 
         data = []
         for row in rows:
-            username = row['username'] or 'Не назначен'
-            created_time = row['created_time']
+            username = row["username"] or "Не назначен"
+            created_time = row["created_time"]
             if created_time:
                 try:
-                    created_time = datetime.strptime(created_time, "%Y-%m-%dT%H:%M").strftime("%Y-%m-%d %H:%M")
+                    created_time = datetime.strptime(
+                        created_time, "%Y-%m-%dT%H:%M"
+                    ).strftime("%Y-%m-%d %H:%M")
                 except ValueError:
                     created_time = created_time
             else:
-                created_time = 'Нет обращений'
-            taken_time = row['taken_time']
+                created_time = "Нет обращений"
+            taken_time = row["taken_time"]
             if taken_time:
                 try:
-                    taken_time = datetime.strptime(taken_time, "%Y-%m-%dT%H:%M").strftime("%Y-%m-%d %H:%M")
+                    taken_time = datetime.strptime(
+                        taken_time, "%Y-%m-%dT%H:%M"
+                    ).strftime("%Y-%m-%d %H:%M")
                 except ValueError:
                     taken_time = taken_time
             else:
-                taken_time = 'Нет обращений'
-            closed_time = row['closed_time']
+                taken_time = "Нет обращений"
+            closed_time = row["closed_time"]
             if closed_time:
                 try:
-                    closed_time = datetime.strptime(closed_time, "%Y-%m-%dT%H:%M").strftime("%Y-%m-%d %H:%M")
+                    closed_time = datetime.strptime(
+                        closed_time, "%Y-%m-%dT%H:%M"
+                    ).strftime("%Y-%m-%d %H:%M")
                 except ValueError:
                     closed_time = closed_time
             else:
-                closed_time = 'Нет обращений'
-            new_serial = row['new_serial'] or 'Не указан'
-            data.append({
-                'Serial': row['serial'],
-                'Appeal Count': row['appeal_count'],
-                'Return Status': row['return_status'] or 'Не указан',
-                'Admin Username': username,
-                'Created Time': created_time,
-                'Taken Time': taken_time,
-                'Closed Time': closed_time,
-                'New Serial': new_serial
-            })
+                closed_time = "Нет обращений"
+            new_serial = row["new_serial"] or "Не указан"
+            data.append(
+                {
+                    "Serial": row["serial"],
+                    "Appeal Count": row["appeal_count"],
+                    "Return Status": row["return_status"] or "Не указан",
+                    "Admin Username": username,
+                    "Created Time": created_time,
+                    "Taken Time": taken_time,
+                    "Closed Time": closed_time,
+                    "New Serial": new_serial,
+                }
+            )
             logger.info(f"Экспортирован серийный номер {row['serial']}")
 
         if not data:
