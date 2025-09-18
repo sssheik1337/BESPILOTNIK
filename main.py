@@ -91,7 +91,14 @@ class SerialCheckMiddleware(BaseMiddleware):
             logger.debug("Не удалось определить user_id, пропускаем событие")
             return await handler(update, data)
 
-        state = data["state"]
+        state = data.get("state")
+        if state is None:
+            logger.debug(
+                "FSM context is unavailable for событие %s, пропускаем проверку серийника",
+                type(event).__name__,
+            )
+            return await handler(update, data)
+
         current_state = await state.get_state()
         logger.debug(f"SerialCheckMiddleware: Текущее состояние FSM: {current_state}")
 
