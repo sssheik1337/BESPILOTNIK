@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 
 from aiogram import Router, F, Bot
+from typing import List, Optional
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -45,6 +46,7 @@ from config import (
     API_FILE_BASE_URL,
     LOCAL_BOT_API_DATA_DIR,
     LOCAL_BOT_API_REMOTE_DIR,
+    LOCAL_BOT_API_CACHE_DIR,
 )
 from datetime import datetime
 import logging
@@ -91,6 +93,59 @@ class AdminResponse(StatesGroup):
     edit_training_center_link = State()
 
 
+def _sanitize_component_for_storage(component: str) -> str:
+    sanitized = component.replace(":", "_")
+    return sanitized
+
+
+def _normalize_component(component: str) -> str:
+    return component.replace(":", "").replace("_", "").replace("-", "").lower()
+
+
+def _candidate_component_names(component: str) -> List[str]:
+    variants = {component}
+    if ":" in component:
+        variants.add(component.replace(":", "_"))
+        variants.add(component.replace(":", "-"))
+        variants.add(component.replace(":", ""))
+    return list(variants)
+
+
+def _resolve_local_path(local_data_root: Path, remote_relative: PurePosixPath) -> Optional[Path]:
+    try:
+        candidate = local_data_root.joinpath(*remote_relative.parts)
+        if candidate.exists():
+            return candidate
+    except (OSError, ValueError):
+        pass
+
+    current_paths = [local_data_root]
+    for part in remote_relative.parts:
+        next_paths = []
+        for base in current_paths:
+            resolved = None
+            for variant in _candidate_component_names(part):
+                candidate = base / variant
+                if candidate.exists():
+                    resolved = candidate
+                    break
+            if resolved is None:
+                normalized_target = _normalize_component(part)
+                try:
+                    for child in base.iterdir():
+                        if _normalize_component(child.name) == normalized_target:
+                            resolved = child
+                            break
+                except OSError:
+                    resolved = None
+            if resolved is not None:
+                next_paths.append(resolved)
+        if not next_paths:
+            return None
+        current_paths = next_paths
+    return current_paths[0] if current_paths else None
+
+
 async def download_from_local_api(file_id: str, token: str, base_dir: str) -> str:
     base_path = Path(base_dir)
     base_path.mkdir(parents=True, exist_ok=True)
@@ -100,7 +155,10 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
     remote_data_root = PurePosixPath(LOCAL_BOT_API_REMOTE_DIR.rstrip("/"))
     local_data_root = Path(LOCAL_BOT_API_DATA_DIR) if LOCAL_BOT_API_DATA_DIR else None
 
-    async def _download_via_telegram(session: aiohttp.ClientSession) -> str:
+    async def _download_via_telegram(
+        session: aiohttp.ClientSession,
+        preferred_relative: Optional[PurePosixPath],
+    ) -> str:
         logger.info(
             "Локальный бот API недоступен, загружаем файл %s через публичный API Telegram",
             file_id,
@@ -114,11 +172,15 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                     f"Ошибка Telegram getFile: HTTP {get_file_resp.status}, ответ: {body}"
                 )
             data = await get_file_resp.json()
-        file_path = data["result"]["file_path"]
-        destination = base_path / Path(file_path)
+
+        telegram_relative = PurePosixPath(data["result"]["file_path"])
+        relative = preferred_relative or telegram_relative
+        safe_relative = Path(*(_sanitize_component_for_storage(p) for p in relative.parts))
+        destination = base_path / safe_relative
         destination.parent.mkdir(parents=True, exist_ok=True)
+
         async with session.get(
-            f"https://api.telegram.org/file/bot{token}/{file_path}"
+            f"https://api.telegram.org/file/bot{token}/{telegram_relative.as_posix()}"
         ) as file_resp:
             if file_resp.status != 200:
                 body = await file_resp.text()
@@ -130,6 +192,8 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                     file_obj.write(chunk)
         logger.debug("Файл %s загружен через Telegram API: %s", file_id, destination)
         return str(destination)
+
+    remote_relative: Optional[PurePosixPath] = None
 
     async with aiohttp.ClientSession() as session:
         try:
@@ -165,12 +229,15 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                 if file_path.startswith(f"{remote_data_root}/"):
                     sanitized_path = file_path.replace(f"{remote_data_root}/", "", 1)
 
-                relative_path = Path(sanitized_path)
-                local_path = base_path / relative_path
+                remote_relative = PurePosixPath(sanitized_path)
+                safe_relative = Path(
+                    *(_sanitize_component_for_storage(part) for part in remote_relative.parts)
+                )
+                local_path = base_path / safe_relative
 
                 if local_data_root and file_path.startswith(f"{remote_data_root}/"):
-                    source_path = local_data_root.joinpath(*PurePosixPath(sanitized_path).parts)
-                    if source_path.exists():
+                    source_path = _resolve_local_path(local_data_root, remote_relative)
+                    if source_path and source_path.exists():
                         if local_path.exists():
                             logger.debug(
                                 "Файл %s уже скопирован локально: %s", file_id, local_path
@@ -195,15 +262,16 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                             )
                     else:
                         logger.warning(
-                            "Файл %s отсутствует в локальном каталоге Bot API: %s",
+                            "Файл %s отсутствует в локальном каталоге Bot API (relative: %s)",
                             file_id,
-                            source_path,
+                            remote_relative,
                         )
 
                 if local_path.exists():
                     logger.debug("Файл найден локально: %s", local_path)
                     return str(local_path)
-                url = f"{file_base_url}/{relative_path.as_posix()}"
+
+                url = f"{file_base_url}/{remote_relative.as_posix()}"
                 async with session.get(url, ssl=False) as file_resp:
                     logger.debug("HTTP-запрос к %s, статус: %s", url, file_resp.status)
                     if file_resp.status != 200:
@@ -223,13 +291,13 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                 "Локальный Telegram Bot API недоступен (%s), выполняем загрузку через публичный API",
                 exc,
             )
-            return await _download_via_telegram(session)
+            return await _download_via_telegram(session, None)
         except Exception as exc:
             logger.warning(
                 "Ошибка при загрузке файла через локальный API: %s. Пробуем публичный API",
                 exc,
             )
-            return await _download_via_telegram(session)
+            return await _download_via_telegram(session, remote_relative)
 
 
 @router.callback_query(F.data == "admin_panel")
@@ -654,7 +722,7 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
         local_path = await download_from_local_api(
             file_id=message.video.file_id,
             token=TOKEN,
-            base_dir="C:/Users/hrome/BESPILOTNIK_files/telegram-bot-api-files",
+            base_dir=LOCAL_BOT_API_CACHE_DIR,
         )
         compressed_path = await compress_video(local_path)
         await state.update_data(video_link=compressed_path)
