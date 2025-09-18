@@ -119,6 +119,7 @@ class SerialCheckMiddleware(BaseMiddleware):
             or current_state.startswith("AppealForm:")
             or current_state.startswith("AdminResponse:")
             or current_state.startswith("BaseManagement:")
+            or current_state.startswith("ManualUpload:")
         )
         if is_fsm_state:
             logger.debug(

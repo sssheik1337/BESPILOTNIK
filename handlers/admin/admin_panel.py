@@ -1,3 +1,6 @@
+import asyncio
+from pathlib import Path
+
 from aiogram import Router, F, Bot
 from aiogram.types import (
     Message,
@@ -46,7 +49,7 @@ from utils.validators import validate_media
 from utils.statuses import APPEAL_STATUSES
 from utils.video import compress_video
 import aiohttp
-import os
+from aiohttp import ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -80,56 +83,105 @@ class AdminResponse(StatesGroup):
 
 
 async def download_from_local_api(file_id: str, token: str, base_dir: str) -> str:
-    async with aiohttp.ClientSession() as session:
-        # Проверка локального сервера
+    base_path = Path(base_dir)
+    base_path.mkdir(parents=True, exist_ok=True)
+
+    async def _download_via_telegram(session: aiohttp.ClientSession) -> str:
+        logger.info(
+            "Локальный бот API недоступен, загружаем файл %s через публичный API Telegram",
+            file_id,
+        )
         async with session.get(
-            f"http://localhost:8081/bot{token}/getMe", ssl=False
-        ) as test_resp:
-            logger.debug(
-                f"Тестовый запрос к http://localhost:8081/bot{token}/getMe, статус: {test_resp.status}"
-            )
-            if test_resp.status != 200:
-                raise Exception(f"Сервер недоступен: HTTP {test_resp.status}")
-        # Получаем file_path
-        async with session.get(
-            f"http://localhost:8081/bot{token}/getFile?file_id={file_id}", ssl=False
-        ) as resp:
-            logger.debug(
-                f"HTTP-запрос getFile: http://localhost:8081/bot{token}/getFile?file_id={file_id}, статус: {resp.status}"
-            )
-            if resp.status != 200:
+            f"https://api.telegram.org/bot{token}/getFile", params={"file_id": file_id}
+        ) as get_file_resp:
+            if get_file_resp.status != 200:
+                body = await get_file_resp.text()
                 raise Exception(
-                    f"Ошибка getFile: HTTP {resp.status}, ответ: {await resp.text()}"
+                    f"Ошибка Telegram getFile: HTTP {get_file_resp.status}, ответ: {body}"
                 )
-            data = await resp.json()
-            if not data.get("ok"):
-                raise Exception(f"Ошибка getFile: {data}")
-            file_path = data["result"]["file_path"]
-            logger.debug(f"Получен file_path: {file_path}")
-            # Обрезаем только префикс /var/lib/telegram-bot-api/
-            if file_path.startswith("/var/lib/telegram-bot-api/"):
-                file_path = file_path.replace("/var/lib/telegram-bot-api/", "", 1)
-            # Формируем относительный путь для HTTP и локального доступа
-            relative_path = file_path
-            local_path = os.path.join(base_dir, relative_path.replace("/", os.sep))
-            # Проверяем, есть ли файл на диске
-            if os.path.exists(local_path):
-                logger.debug(f"Файл найден локально: {local_path}")
-                return local_path
-            # Fallback на HTTP
-            url = f"http://localhost:8081/file/bot{token}/{relative_path}"
-            async with session.get(url, ssl=False) as resp:
-                logger.debug(f"HTTP-запрос к {url}, статус: {resp.status}")
+            data = await get_file_resp.json()
+        file_path = data["result"]["file_path"]
+        destination = base_path / Path(file_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        async with session.get(
+            f"https://api.telegram.org/file/bot{token}/{file_path}"
+        ) as file_resp:
+            if file_resp.status != 200:
+                body = await file_resp.text()
+                raise Exception(
+                    f"Ошибка загрузки файла Telegram: HTTP {file_resp.status}, ответ: {body}"
+                )
+            with destination.open("wb") as file_obj:
+                async for chunk in file_resp.content.iter_chunked(1 << 14):
+                    file_obj.write(chunk)
+        logger.debug("Файл %s загружен через Telegram API: %s", file_id, destination)
+        return str(destination)
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(
+                f"http://localhost:8081/bot{token}/getMe", ssl=False
+            ) as test_resp:
+                logger.debug(
+                    "Тестовый запрос к http://localhost:8081/bot%s/getMe, статус: %s",
+                    token,
+                    test_resp.status,
+                )
+                if test_resp.status != 200:
+                    raise Exception(f"Сервер недоступен: HTTP {test_resp.status}")
+
+            async with session.get(
+                f"http://localhost:8081/bot{token}/getFile", params={"file_id": file_id}, ssl=False
+            ) as resp:
+                logger.debug(
+                    "HTTP-запрос getFile: http://localhost:8081/bot%s/getFile?file_id=%s, статус: %s",
+                    token,
+                    file_id,
+                    resp.status,
+                )
                 if resp.status != 200:
                     raise Exception(
-                        f"Ошибка загрузки файла: HTTP {resp.status}, ответ: {await resp.text()}"
+                        f"Ошибка getFile: HTTP {resp.status}, ответ: {await resp.text()}"
                     )
-                content = await resp.read()
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                with open(local_path, "wb") as f:
-                    f.write(content)
-                logger.debug(f"Файл загружен через HTTP и сохранён: {local_path}")
-            return local_path
+                data = await resp.json()
+                if not data.get("ok"):
+                    raise Exception(f"Ошибка getFile: {data}")
+                file_path = data["result"]["file_path"]
+                logger.debug("Получен file_path: %s", file_path)
+                if file_path.startswith("/var/lib/telegram-bot-api/"):
+                    file_path = file_path.replace("/var/lib/telegram-bot-api/", "", 1)
+                relative_path = Path(file_path)
+                local_path = base_path / relative_path
+                if local_path.exists():
+                    logger.debug("Файл найден локально: %s", local_path)
+                    return str(local_path)
+                url = f"http://localhost:8081/file/bot{token}/{relative_path.as_posix()}"
+                async with session.get(url, ssl=False) as file_resp:
+                    logger.debug("HTTP-запрос к %s, статус: %s", url, file_resp.status)
+                    if file_resp.status != 200:
+                        raise Exception(
+                            f"Ошибка загрузки файла: HTTP {file_resp.status}, ответ: {await file_resp.text()}"
+                        )
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    with local_path.open("wb") as f:
+                        async for chunk in file_resp.content.iter_chunked(1 << 14):
+                            f.write(chunk)
+                    logger.debug(
+                        "Файл загружен через локальный HTTP и сохранён: %s", local_path
+                    )
+                return str(local_path)
+        except (ClientError, asyncio.TimeoutError) as exc:
+            logger.warning(
+                "Локальный Telegram Bot API недоступен (%s), выполняем загрузку через публичный API",
+                exc,
+            )
+            return await _download_via_telegram(session)
+        except Exception as exc:
+            logger.warning(
+                "Ошибка при загрузке файла через локальный API: %s. Пробуем публичный API",
+                exc,
+            )
+            return await _download_via_telegram(session)
 
 
 @router.callback_query(F.data == "admin_panel")
