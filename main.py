@@ -91,30 +91,6 @@ class SerialCheckMiddleware(BaseMiddleware):
             logger.debug("Не удалось определить user_id, пропускаем событие")
             return await handler(update, data)
 
-        state = data.get("state")
-        if state is None:
-            logger.debug(
-                "FSM context is unavailable for событие %s, пропускаем проверку серийника",
-                type(event).__name__,
-            )
-            return await handler(update, data)
-
-        current_state = await state.get_state()
-        logger.debug(f"SerialCheckMiddleware: Текущее состояние FSM: {current_state}")
-
-        is_fsm_state = current_state and (
-            current_state.startswith("UserState:")
-            or current_state.startswith("UserExam:")
-            or current_state.startswith("AppealForm:")
-            or current_state.startswith("AdminResponse:")
-            or current_state.startswith("BaseManagement:")
-        )
-        if is_fsm_state:
-            logger.debug(
-                f"Пропускаем сообщение в состоянии {current_state} для пользователя @{username} (ID: {user_id})"
-            )
-            return await handler(update, data)
-
         if isinstance(event, Message):
             if event.text and event.text.startswith("/"):
                 logger.debug(
@@ -129,6 +105,41 @@ class SerialCheckMiddleware(BaseMiddleware):
         if isinstance(event, CallbackQuery):
             logger.debug(
                 f"Пропускаем CallbackQuery для пользователя @{username} (ID: {user_id}) в чате типа {event.chat.type}"
+            )
+            return await handler(update, data)
+
+        state = data.get("state")
+        if state is None:
+            logger.debug(
+                "FSM context is unavailable for событие %s, пропускаем проверку серийника",
+                type(event).__name__,
+            )
+            return await handler(update, data)
+
+        try:
+            current_state = await state.get_state()
+        except Exception as exc:  # pragma: no cover - защитная логика на случай ошибок FSM
+            logger.warning(
+                "Не удалось получить состояние FSM (%s) для пользователя %s (ID %s): %s",
+                type(event).__name__,
+                f"@{username}",
+                user_id,
+                exc,
+            )
+            return await handler(update, data)
+
+        logger.debug(f"SerialCheckMiddleware: Текущее состояние FSM: {current_state}")
+
+        is_fsm_state = current_state and (
+            current_state.startswith("UserState:")
+            or current_state.startswith("UserExam:")
+            or current_state.startswith("AppealForm:")
+            or current_state.startswith("AdminResponse:")
+            or current_state.startswith("BaseManagement:")
+        )
+        if is_fsm_state:
+            logger.debug(
+                f"Пропускаем сообщение в состоянии {current_state} для пользователя @{username} (ID: {user_id})"
             )
             return await handler(update, data)
 
