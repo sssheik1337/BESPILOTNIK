@@ -6,5 +6,5 @@ APPEAL_STATUSES = {
     "replacement_process": "Процесс замены",
     "processed": "Обработана",
     "awaiting_specialist": "Ожидает выезда специалиста",
-    "closed": "Закрыта"  # Добавлено
+    "closed": "Закрыта",  # Добавлено
 }
