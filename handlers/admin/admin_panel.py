@@ -98,21 +98,36 @@ class AdminResponse(StatesGroup):
     edit_training_center_link = State()
 
 
+COLON_VARIANTS = (":", "\uf03a", "\uff1a", "\ufe55", "\ufe13", "\u2236")
+
+
+def _replace_colon_variants(value: str, replacement: str) -> str:
+    for variant in COLON_VARIANTS:
+        value = value.replace(variant, replacement)
+    return value
+
+
 def _sanitize_component_for_storage(component: str) -> str:
-    sanitized = component.replace(":", "_")
+    sanitized = _replace_colon_variants(component, "_")
     return sanitized
 
 
 def _normalize_component(component: str) -> str:
-    return component.replace(":", "").replace("_", "").replace("-", "").lower()
+    normalized = _replace_colon_variants(component, "")
+    return normalized.replace("_", "").replace("-", "").lower()
 
 
 def _candidate_component_names(component: str) -> List[str]:
     variants = {component}
-    if ":" in component:
-        variants.add(component.replace(":", "_"))
-        variants.add(component.replace(":", "-"))
-        variants.add(component.replace(":", ""))
+
+    if any(variant in component for variant in COLON_VARIANTS):
+        variants.add(_replace_colon_variants(component, "_"))
+        variants.add(_replace_colon_variants(component, "-"))
+        variants.add(_replace_colon_variants(component, ""))
+        for variant in COLON_VARIANTS:
+            if variant in component or ":" in component:
+                variants.add(component.replace(":", variant))
+                variants.add(_replace_colon_variants(component, variant))
     return list(variants)
 
 
