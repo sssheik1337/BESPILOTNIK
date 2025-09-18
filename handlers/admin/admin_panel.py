@@ -38,7 +38,7 @@ from database.db import (
     add_training_center,
     get_exam_records_by_personal_number,
 )
-from config import MAIN_ADMIN_IDS, TOKEN
+from config import MAIN_ADMIN_IDS, TOKEN, API_BASE_URL, API_FILE_BASE_URL
 from datetime import datetime
 import logging
 from aiogram.exceptions import TelegramBadRequest
@@ -86,6 +86,9 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
     base_path = Path(base_dir)
     base_path.mkdir(parents=True, exist_ok=True)
 
+    api_base_url = API_BASE_URL.format(token=token).rstrip("/")
+    file_base_url = API_FILE_BASE_URL.format(token=token).rstrip("/")
+
     async def _download_via_telegram(session: aiohttp.ClientSession) -> str:
         logger.info(
             "Локальный бот API недоступен, загружаем файл %s через публичный API Telegram",
@@ -119,23 +122,21 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
 
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(
-                f"http://localhost:8081/bot{token}/getMe", ssl=False
-            ) as test_resp:
+            async with session.get(f"{api_base_url}/getMe", ssl=False) as test_resp:
                 logger.debug(
-                    "Тестовый запрос к http://localhost:8081/bot%s/getMe, статус: %s",
-                    token,
+                    "Тестовый запрос к %s/getMe, статус: %s",
+                    api_base_url,
                     test_resp.status,
                 )
                 if test_resp.status != 200:
                     raise Exception(f"Сервер недоступен: HTTP {test_resp.status}")
 
             async with session.get(
-                f"http://localhost:8081/bot{token}/getFile", params={"file_id": file_id}, ssl=False
+                f"{api_base_url}/getFile", params={"file_id": file_id}, ssl=False
             ) as resp:
                 logger.debug(
-                    "HTTP-запрос getFile: http://localhost:8081/bot%s/getFile?file_id=%s, статус: %s",
-                    token,
+                    "HTTP-запрос getFile: %s/getFile?file_id=%s, статус: %s",
+                    api_base_url,
                     file_id,
                     resp.status,
                 )
@@ -155,7 +156,7 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                 if local_path.exists():
                     logger.debug("Файл найден локально: %s", local_path)
                     return str(local_path)
-                url = f"http://localhost:8081/file/bot{token}/{relative_path.as_posix()}"
+                url = f"{file_base_url}/{relative_path.as_posix()}"
                 async with session.get(url, ssl=False) as file_resp:
                     logger.debug("HTTP-запрос к %s, статус: %s", url, file_resp.status)
                     if file_resp.status != 200:
