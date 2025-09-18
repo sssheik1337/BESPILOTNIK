@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from pathlib import Path
 
 from aiogram import Router, F, Bot
@@ -117,6 +118,22 @@ def _normalize_component(component: str) -> str:
     return normalized.replace("_", "").replace("-", "").lower()
 
 
+def _safe_log_arg(arg):
+    if isinstance(arg, (Path, PurePosixPath)):
+        arg = str(arg)
+    if isinstance(arg, str):
+        encoding = sys.stdout.encoding or sys.getdefaultencoding()
+        try:
+            arg.encode(encoding, errors="strict")
+        except UnicodeEncodeError:
+            arg = arg.encode("ascii", errors="backslashreplace").decode("ascii")
+    return arg
+
+
+def _safe_log_args(*args):
+    return tuple(_safe_log_arg(arg) for arg in args)
+
+
 def _candidate_component_names(component: str) -> List[str]:
     variants = {component}
 
@@ -210,7 +227,10 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
             with destination.open("wb") as file_obj:
                 async for chunk in file_resp.content.iter_chunked(1 << 14):
                     file_obj.write(chunk)
-        logger.debug("Файл %s загружен через Telegram API: %s", file_id, destination)
+        logger.debug(
+            "Файл %s загружен через Telegram API: %s",
+            *_safe_log_args(file_id, destination),
+        )
         return str(destination)
 
     remote_relative: Optional[PurePosixPath] = None
@@ -276,7 +296,8 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
 
                     if local_path.exists():
                         logger.debug(
-                            "Файл %s уже скопирован локально: %s", file_id, local_path
+                            "Файл %s уже скопирован локально: %s",
+                            *_safe_log_args(file_id, local_path),
                         )
                         return str(local_path)
                     local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -284,21 +305,19 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                         await asyncio.to_thread(shutil.copy2, source_path, local_path)
                         logger.debug(
                             "Файл %s скопирован из локального каталога %s в %s",
-                            file_id,
-                            source_path,
-                            local_path,
+                            *_safe_log_args(file_id, source_path, local_path),
                         )
                         return str(local_path)
                     except Exception as copy_exc:
                         logger.warning(
                             "Не удалось скопировать файл %s из %s: %s",
-                            file_id,
-                            source_path,
-                            copy_exc,
+                            *_safe_log_args(file_id, source_path, copy_exc),
                         )
 
                 if local_path.exists():
-                    logger.debug("Файл найден локально: %s", local_path)
+                    logger.debug(
+                        "Файл найден локально: %s", *_safe_log_args(local_path)
+                    )
                     return str(local_path)
 
                 url = f"{file_base_url}/{remote_relative.as_posix()}"
@@ -313,7 +332,8 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                         async for chunk in file_resp.content.iter_chunked(1 << 14):
                             f.write(chunk)
                     logger.debug(
-                        "Файл загружен через локальный HTTP и сохранён: %s", local_path
+                        "Файл загружен через локальный HTTP и сохранён: %s",
+                        *_safe_log_args(local_path),
                     )
                 return str(local_path)
         except LocalBotAPIConfigurationError:
