@@ -122,12 +122,11 @@ def _safe_log_arg(arg):
     if isinstance(arg, (Path, PurePosixPath)):
         arg = str(arg)
     if isinstance(arg, str):
-        encoding = sys.stdout.encoding or sys.getdefaultencoding()
-        try:
-            arg.encode(encoding, errors="strict")
-        except UnicodeEncodeError:
-            arg = arg.encode("ascii", errors="backslashreplace").decode("ascii")
-    return arg
+        return arg.encode("ascii", errors="backslashreplace").decode("ascii")
+    try:
+        return str(arg)
+    except Exception:
+        return repr(arg)
 
 
 def _safe_log_args(*args):
