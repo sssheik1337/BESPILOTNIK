@@ -38,7 +38,14 @@ from database.db import (
     add_training_center,
     get_exam_records_by_personal_number,
 )
-from config import MAIN_ADMIN_IDS, TOKEN, API_BASE_URL, API_FILE_BASE_URL
+from config import (
+    MAIN_ADMIN_IDS,
+    TOKEN,
+    API_BASE_URL,
+    API_FILE_BASE_URL,
+    LOCAL_BOT_API_DATA_DIR,
+    LOCAL_BOT_API_REMOTE_DIR,
+)
 from datetime import datetime
 import logging
 from aiogram.exceptions import TelegramBadRequest
@@ -50,6 +57,8 @@ from utils.statuses import APPEAL_STATUSES
 from utils.video import compress_video
 import aiohttp
 from aiohttp import ClientError
+import shutil
+from pathlib import PurePosixPath
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +97,8 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
 
     api_base_url = API_BASE_URL.format(token=token).rstrip("/")
     file_base_url = API_FILE_BASE_URL.format(token=token).rstrip("/")
+    remote_data_root = PurePosixPath(LOCAL_BOT_API_REMOTE_DIR.rstrip("/"))
+    local_data_root = Path(LOCAL_BOT_API_DATA_DIR) if LOCAL_BOT_API_DATA_DIR else None
 
     async def _download_via_telegram(session: aiohttp.ClientSession) -> str:
         logger.info(
@@ -149,10 +160,46 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                     raise Exception(f"Ошибка getFile: {data}")
                 file_path = data["result"]["file_path"]
                 logger.debug("Получен file_path: %s", file_path)
-                if file_path.startswith("/var/lib/telegram-bot-api/"):
-                    file_path = file_path.replace("/var/lib/telegram-bot-api/", "", 1)
-                relative_path = Path(file_path)
+
+                sanitized_path = file_path
+                if file_path.startswith(f"{remote_data_root}/"):
+                    sanitized_path = file_path.replace(f"{remote_data_root}/", "", 1)
+
+                relative_path = Path(sanitized_path)
                 local_path = base_path / relative_path
+
+                if local_data_root and file_path.startswith(f"{remote_data_root}/"):
+                    source_path = local_data_root.joinpath(*PurePosixPath(sanitized_path).parts)
+                    if source_path.exists():
+                        if local_path.exists():
+                            logger.debug(
+                                "Файл %s уже скопирован локально: %s", file_id, local_path
+                            )
+                            return str(local_path)
+                        local_path.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            await asyncio.to_thread(shutil.copy2, source_path, local_path)
+                            logger.debug(
+                                "Файл %s скопирован из локального каталога %s в %s",
+                                file_id,
+                                source_path,
+                                local_path,
+                            )
+                            return str(local_path)
+                        except Exception as copy_exc:
+                            logger.warning(
+                                "Не удалось скопировать файл %s из %s: %s",
+                                file_id,
+                                source_path,
+                                copy_exc,
+                            )
+                    else:
+                        logger.warning(
+                            "Файл %s отсутствует в локальном каталоге Bot API: %s",
+                            file_id,
+                            source_path,
+                        )
+
                 if local_path.exists():
                     logger.debug("Файл найден локально: %s", local_path)
                     return str(local_path)

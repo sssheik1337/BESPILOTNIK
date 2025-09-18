@@ -1,5 +1,10 @@
 TOKEN = "8133341294:AAEzBVr7n-K5D-70pY4IZXlaBUH1J2Nlh2A"
 LOCAL_BOT_API_HOST = "http://localhost:8081"
+LOCAL_BOT_API_REMOTE_DIR = "/var/lib/telegram-bot-api"
+# Укажи путь к примонтированному каталогу данных Telegram Bot API на хосте,
+# если контейнер запущен с флагом --local. Например:
+# LOCAL_BOT_API_DATA_DIR = r"C:\\TelegramBotApiData"
+LOCAL_BOT_API_DATA_DIR = None
 API_BASE_URL = f"{LOCAL_BOT_API_HOST}/bot{{token}}/"
 API_FILE_BASE_URL = f"{LOCAL_BOT_API_HOST}/file/bot{{token}}/"
 NGROK_PUBLIC_URL = "https://10bdf31051e0.ngrok-free.app"  # Замени на адрес от ngrok
