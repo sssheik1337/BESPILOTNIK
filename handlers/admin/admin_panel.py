@@ -26,6 +26,7 @@ from database.db import (
     get_assigned_appeals,
     get_defect_reports,
     add_exam_record,
+    update_exam_record,
     get_exam_records,
     add_defect_report,
     set_code_word,
@@ -43,6 +44,7 @@ import pandas as pd
 import json
 from utils.validators import validate_media
 from utils.statuses import APPEAL_STATUSES
+from utils.video import compress_video
 import aiohttp
 import os
 
@@ -198,6 +200,7 @@ async def select_exam_record(callback: CallbackQuery, state: FSMContext, **data)
         callsign=record["callsign"],
         specialty=record["specialty"],
         contact=record["contact"],
+        training_center_id=record["training_center_id"],
     )
     await callback.message.edit_text(
         "Прикрепите видео:",
@@ -553,7 +556,8 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
             token=TOKEN,
             base_dir="C:/Users/hrome/BESPILOTNIK_files/telegram-bot-api-files",
         )
-        await state.update_data(video_link=local_path)
+        compressed_path = await compress_video(local_path)
+        await state.update_data(video_link=compressed_path)
         await message.answer(
             "Видео принято. Загрузите фото (до 5 штук) или завершите.",
             reply_markup=InlineKeyboardMarkup(
@@ -567,7 +571,7 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
             ),
         )
         logger.debug(
-            f"Видео принято от @{message.from_user.username} (ID: {message.from_user.id}), file_id: {message.video.file_id}, local_path: {local_path}"
+            f"Видео принято от @{message.from_user.username} (ID: {message.from_user.id}), file_id: {message.video.file_id}, local_path: {compressed_path}"
         )
         await state.set_state(AdminResponse.exam_photo)
     except Exception as e:
@@ -734,21 +738,37 @@ async def finish_exam(callback: CallbackQuery, state: FSMContext, **data):
         video_link = state_data["video_link"]
         photo_links = state_data.get("photo_links", [])
 
-        exam_id = await add_exam_record(
-            fio=fio,
-            personal_number=personal_number,
-            military_unit=military_unit,
-            subdivision=subdivision,
-            callsign=callsign,
-            specialty=specialty,
-            contact=contact,
-            training_center_id=training_center_id,
-            video_link=video_link,
-            photo_links=json.dumps(photo_links),
-        )
+        existing_exam_id = state_data.get("exam_id")
+        now_str = datetime.now().strftime("%Y-%m-%dT%H:%M")
+
+        if existing_exam_id:
+            await update_exam_record(
+                exam_id=existing_exam_id,
+                video_link=video_link,
+                photo_links=photo_links,
+                accepted_date=now_str,
+            )
+            exam_id = existing_exam_id
+            result_text = "обновлён"
+        else:
+            exam_id = await add_exam_record(
+                fio=fio,
+                subdivision=subdivision,
+                military_unit=military_unit,
+                callsign=callsign,
+                specialty=specialty,
+                contact=contact,
+                personal_number=personal_number,
+                training_center_id=training_center_id,
+                video_link=video_link,
+                photo_links=photo_links,
+                application_date=now_str,
+                accepted_date=now_str,
+            )
+            result_text = "успешно добавлен"
 
         await callback.message.edit_text(
-            f"Экзамен №{exam_id} успешно добавлен!",
+            f"Экзамен №{exam_id} {result_text}!",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
@@ -756,7 +776,7 @@ async def finish_exam(callback: CallbackQuery, state: FSMContext, **data):
             ),
         )
         logger.info(
-            f"Экзамен №{exam_id} добавлен пользователем @{callback.from_user.username}"
+            f"Экзамен №{exam_id} {result_text} пользователем @{callback.from_user.username}"
         )
         await state.clear()
     except Exception as e:
@@ -1957,25 +1977,75 @@ async def submit_exam(callback: CallbackQuery, state: FSMContext, **data):
     callsign = data_state.get("callsign", "")
     specialty = data_state.get("specialty", "")
     contact = data_state.get("contact", "")
+    personal_number = data_state.get("personal_number", "")
+    training_center_id = data_state.get("training_center_id")
     video_link = data_state.get("video_link", "")
     photo_links = data_state.get("photo_links", [])
-    await add_exam_record(
-        fio,
-        subdivision,
-        military_unit,
-        callsign,
-        specialty,
-        contact,
-        video_link,
-        photo_links,
-    )
+
+    if training_center_id is None:
+        await callback.message.edit_text(
+            "Ошибка: не выбран учебный центр.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
+                ]
+            ),
+        )
+        await state.clear()
+        logger.error(
+            "Не удалось принять экзамен в submit_exam: отсутствует training_center_id"
+        )
+        return
+
+    if isinstance(photo_links, str):
+        try:
+            photo_links = json.loads(photo_links)
+        except json.JSONDecodeError:
+            photo_links = [photo_links]
+
+    if not isinstance(photo_links, list):
+        photo_links = [photo_links]
+
+    existing_exam_id = data_state.get("exam_id")
+    now_str = datetime.now().strftime("%Y-%m-%dT%H:%M")
+
+    if existing_exam_id:
+        await update_exam_record(
+            exam_id=existing_exam_id,
+            video_link=video_link,
+            photo_links=photo_links,
+            accepted_date=now_str,
+        )
+        exam_id = existing_exam_id
+        result_text = "обновлён"
+    else:
+        exam_id = await add_exam_record(
+            fio=fio,
+            subdivision=subdivision,
+            military_unit=military_unit,
+            callsign=callsign,
+            specialty=specialty,
+            contact=contact,
+            personal_number=personal_number,
+            training_center_id=training_center_id,
+            video_link=video_link,
+            photo_links=photo_links,
+            application_date=now_str,
+            accepted_date=now_str,
+        )
+        result_text = "успешно добавлен"
+
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
         ]
     )
-    await callback.message.edit_text("Экзамен принят.", reply_markup=keyboard)
-    logger.info(f"Экзамен принят от @{callback.from_user.username}")
+    await callback.message.edit_text(
+        f"Экзамен №{exam_id} {result_text}.", reply_markup=keyboard
+    )
+    logger.info(
+        f"Экзамен №{exam_id} {result_text} от @{callback.from_user.username}"
+    )
     await state.clear()
 
 
@@ -2008,20 +2078,33 @@ async def export_exams_handler(callback: CallbackQuery, **data):
         )
         return
     data = []
+    time_format = "%Y-%m-%dT%H:%M"
+
+    def format_datetime(value) -> str:
+        if not value:
+            return "Не указана"
+        try:
+            return datetime.strptime(value, time_format).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return value
+
     for record in records:
-        photo_links = json.loads(record["photo_links"] or "[]")
+        record_dict = dict(record)
+        photo_links = json.loads(record_dict.get("photo_links") or "[]")
         data.append(
             {
-                "ФИО": record["fio"],
-                "Личный номер": record["personal_number"],
-                "Подразделение": record["subdivision"],
-                "В/Ч": record["military_unit"],
-                "Позывной": record["callsign"],
-                "Направление": record["specialty"],
-                "Контакт": record["contact"],
-                "УТЦ": record["center_name"] or "Отсутствует",
-                "Видео": record["video_link"] or "Отсутствует",
+                "ФИО": record_dict.get("fio"),
+                "Личный номер": record_dict.get("personal_number"),
+                "Подразделение": record_dict.get("subdivision"),
+                "В/Ч": record_dict.get("military_unit"),
+                "Позывной": record_dict.get("callsign"),
+                "Направление": record_dict.get("specialty"),
+                "Контакт": record_dict.get("contact"),
+                "УТЦ": record_dict.get("center_name") or "Отсутствует",
+                "Видео": record_dict.get("video_link") or "Отсутствует",
                 "Фото": ", ".join(photo_links) or "Отсутствует",
+                "Дата заявки": format_datetime(record_dict.get("application_date")),
+                "Дата приёма": format_datetime(record_dict.get("accepted_date")),
             }
         )
     df = pd.DataFrame(data)

@@ -154,9 +154,21 @@ async def create_tables():
                         video_link TEXT,
                         photo_links TEXT,
                         training_center_id INTEGER,
+                        normalized TEXT,
+                        application_date TEXT,
+                        accepted_date TEXT,
                         FOREIGN KEY (training_center_id) REFERENCES training_centers(id)
                     )
                 """)
+        await conn.execute(
+            "ALTER TABLE exam_records ADD COLUMN IF NOT EXISTS normalized TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE exam_records ADD COLUMN IF NOT EXISTS application_date TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE exam_records ADD COLUMN IF NOT EXISTS accepted_date TEXT"
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_messages (
                 message_id BIGINT,
@@ -192,15 +204,23 @@ async def add_exam_record(
     training_center_id,
     video_link=None,
     photo_links=None,
+    application_date=None,
+    accepted_date=None,
 ):
     async with pool.acquire() as conn:
         normalized = normalize_personal_number(personal_number)
         logger.debug(
             f"Сохраняемый личный номер: {personal_number}, нормализованный: {normalized}"
         )
+        if application_date is None:
+            application_date = datetime.now().strftime("%Y-%m-%dT%H:%M")
+        if isinstance(photo_links, list):
+            photo_links_payload = json.dumps(photo_links) if photo_links else None
+        else:
+            photo_links_payload = photo_links if photo_links else None
         exam_id = await conn.fetchval(
-            "INSERT INTO exam_records (fio, subdivision, military_unit, callsign, specialty, contact, personal_number, training_center_id, video_link, photo_links, normalized) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING exam_id",
+            "INSERT INTO exam_records (fio, subdivision, military_unit, callsign, specialty, contact, personal_number, training_center_id, video_link, photo_links, normalized, application_date, accepted_date) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING exam_id",
             fio,
             subdivision,
             military_unit,
@@ -210,8 +230,10 @@ async def add_exam_record(
             personal_number,
             training_center_id,
             video_link,
-            json.dumps(photo_links) if photo_links else None,
+            photo_links_payload,
             normalized,
+            application_date,
+            accepted_date,
         )
         logger.info(
             f"Экзамен №{exam_id} добавлен для {fio} с УТЦ ID {training_center_id}"
@@ -219,21 +241,33 @@ async def add_exam_record(
         return exam_id
 
 
-async def update_exam_record(exam_id, video_link=None, photo_links=None):
+async def update_exam_record(
+    exam_id,
+    video_link=None,
+    photo_links=None,
+    accepted_date=None,
+):
     async with pool.acquire() as conn:
         async with conn.transaction():  # Гарантируем коммит транзакции
+            if isinstance(photo_links, list):
+                photo_links_payload = json.dumps(photo_links) if photo_links else None
+            else:
+                photo_links_payload = photo_links if photo_links else None
             result = await conn.execute(
                 """
-                UPDATE exam_records 
-                SET video_link = $1, photo_links = $2
-                WHERE exam_id = $3
+                UPDATE exam_records
+                SET video_link = COALESCE($1, video_link),
+                    photo_links = COALESCE($2, photo_links),
+                    accepted_date = COALESCE($3, accepted_date)
+                WHERE exam_id = $4
             """,
                 video_link,
-                json.dumps(photo_links) if photo_links else None,
+                photo_links_payload,
+                accepted_date,
                 exam_id,
             )
             logger.debug(
-                f"Обновление записи экзамена ID {exam_id}: video_link={video_link}, photo_links={photo_links}, result={result}"
+                f"Обновление записи экзамена ID {exam_id}: video_link={video_link}, photo_links={photo_links}, accepted_date={accepted_date}, result={result}"
             )
         logger.info(
             f"Запись экзамена ID {exam_id} обновлена с видео {video_link} и фото {photo_links}"
