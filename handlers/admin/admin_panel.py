@@ -775,7 +775,31 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
             token=TOKEN,
             base_dir=LOCAL_BOT_API_CACHE_DIR,
         )
-        compressed_path = await compress_video(local_path)
+        progress_message = await message.answer(
+            "Видео получено. Выполняется сжатие, это может занять несколько минут..."
+        )
+        try:
+            compressed_path = await compress_video(local_path)
+        except Exception:
+            if progress_message:
+                try:
+                    await progress_message.edit_text(
+                        "Не удалось сжать видео, используем исходный файл."
+                    )
+                except TelegramBadRequest:
+                    pass
+            raise
+        else:
+            if progress_message:
+                try:
+                    if Path(compressed_path) == Path(local_path):
+                        await progress_message.edit_text(
+                            "Сжатие не потребовалось, используем исходный файл."
+                        )
+                    else:
+                        await progress_message.edit_text("Сжатие завершено ✅")
+                except TelegramBadRequest:
+                    pass
         await state.update_data(video_link=compressed_path)
         await message.answer(
             "Видео принято. Загрузите фото (до 5 штук) или завершите.",

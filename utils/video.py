@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from pathlib import Path
+from time import perf_counter
 from typing import Iterable, Optional
 
 import ffmpeg
@@ -33,12 +34,16 @@ async def _run_ffmpeg(
         )
         return stream.run(capture_stdout=True, capture_stderr=True)
 
+    start = perf_counter()
+
     try:
         stdout, stderr = await asyncio.to_thread(_encode)
+        duration = perf_counter() - start
         logger.debug(
-            "FFmpeg завершил перекодирование %s (CRF=%s): stdout=%s, stderr=%s",
+            "FFmpeg завершил перекодирование %s (CRF=%s) за %.2f с: stdout=%s, stderr=%s",
             input_path,
             crf,
+            duration,
             stdout.decode(errors="ignore"),
             stderr.decode(errors="ignore"),
         )
@@ -83,15 +88,52 @@ async def compress_video(
     original_size = source_path.stat().st_size
     best_output: Optional[Path] = None
     temp_outputs: set[Path] = set()
+    crf_levels = tuple(crf_levels)
+    total_attempts = len(crf_levels)
+    if total_attempts == 0:
+        logger.warning(
+            "Список уровней CRF пуст при сжатии %s. Возвращаем исходный файл.",
+            input_file,
+        )
+        return input_file
 
-    for crf in crf_levels:
+    original_size_mb = original_size / (1024 * 1024)
+    logger.info(
+        "Начинаем сжатие видео %s (%.2f МБ). Целевой размер: %s МБ",
+        input_file,
+        original_size_mb,
+        target_size_mb,
+    )
+
+    start_time = perf_counter()
+
+    for attempt_index, crf in enumerate(crf_levels, start=1):
         temp_output = source_path.with_name(f"{source_path.stem}_compressed_{crf}.mp4")
         temp_outputs.add(temp_output)
+        attempt_started = perf_counter()
+        logger.info(
+            "Запуск ffmpeg для %s с CRF=%s (попытка %s/%s)",
+            input_file,
+            crf,
+            attempt_index,
+            total_attempts,
+        )
         compressed = await _run_ffmpeg(source_path, temp_output, crf=crf)
         if not compressed or not compressed.exists():
+            logger.info(
+                "FFmpeg не создал сжатый файл для %s при CRF=%s. Продолжаем попытки.",
+                input_file,
+                crf,
+            )
             continue
 
         size_mb = compressed.stat().st_size / (1024 * 1024)
+        logger.info(
+            "Получен файл %s размером %.2f МБ за %.2f с",
+            compressed,
+            size_mb,
+            perf_counter() - attempt_started,
+        )
         logger.debug(
             "Получен файл %s размером %.2f МБ для %s при CRF=%s",
             compressed,
@@ -131,7 +173,9 @@ async def compress_video(
             if artifact.exists():
                 artifact.unlink(missing_ok=True)
         logger.warning(
-            "Не удалось сжать видео %s, используется исходный файл.", input_file
+            "Не удалось сжать видео %s, используется исходный файл (время обработки %.2f с).",
+            input_file,
+            perf_counter() - start_time,
         )
         return input_file
 
@@ -145,10 +189,11 @@ async def compress_video(
         source_path.unlink(missing_ok=True)
         best_output.replace(final_path)
         logger.info(
-            "Видео %s успешно сжато и сохранено как %s (%.2f МБ)",
+            "Видео %s успешно сжато и сохранено как %s (%.2f МБ) за %.2f с",
             input_file,
             final_path,
             final_path.stat().st_size / (1024 * 1024),
+            perf_counter() - start_time,
         )
         return str(final_path)
     except Exception:
