@@ -91,23 +91,6 @@ class SerialCheckMiddleware(BaseMiddleware):
             logger.debug("Не удалось определить user_id, пропускаем событие")
             return await handler(update, data)
 
-        if isinstance(event, Message):
-            if event.text and event.text.startswith("/"):
-                logger.debug(
-                    f"Обработка команды '{event.text}' от @{username} (ID: {user_id}) в чате типа {event.chat.type}"
-                )
-                return await handler(update, data)
-            logger.debug(
-                f"Игнорируем сообщение '{event.text}' от @{username} (ID: {user_id}) в чате типа {event.chat.type}, не является командой"
-            )
-            return
-
-        if isinstance(event, CallbackQuery):
-            logger.debug(
-                f"Пропускаем CallbackQuery для пользователя @{username} (ID: {user_id}) в чате типа {event.chat.type}"
-            )
-            return await handler(update, data)
-
         state = data.get("state")
         if state is None:
             logger.debug(
@@ -140,6 +123,23 @@ class SerialCheckMiddleware(BaseMiddleware):
         if is_fsm_state:
             logger.debug(
                 f"Пропускаем сообщение в состоянии {current_state} для пользователя @{username} (ID: {user_id})"
+            )
+            return await handler(update, data)
+
+        if isinstance(event, Message):
+            if event.text and event.text.startswith("/"):
+                logger.debug(
+                    f"Обработка команды '{event.text}' от @{username} (ID: {user_id}) в чате типа {event.chat.type}"
+                )
+                return await handler(update, data)
+            logger.debug(
+                f"Игнорируем сообщение '{event.text}' от @{username} (ID: {user_id}) в чате типа {event.chat.type}, не является командой"
+            )
+            return
+
+        if isinstance(event, CallbackQuery):
+            logger.debug(
+                f"Пропускаем CallbackQuery для пользователя @{username} (ID: {user_id}) в чате типа {event.chat.type}"
             )
             return await handler(update, data)
 
