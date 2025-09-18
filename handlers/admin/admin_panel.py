@@ -67,6 +67,11 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
+class LocalBotAPIConfigurationError(RuntimeError):
+    """Возникает, когда локальный Bot API запущен в режиме --local без корректного каталога данных."""
+
+
+
 class AdminResponse(StatesGroup):
     add_channel = State()
     edit_channel = State()
@@ -226,7 +231,8 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                 logger.debug("Получен file_path: %s", file_path)
 
                 sanitized_path = file_path
-                if file_path.startswith(f"{remote_data_root}/"):
+                is_remote_local = file_path.startswith(f"{remote_data_root}/")
+                if is_remote_local:
                     sanitized_path = file_path.replace(f"{remote_data_root}/", "", 1)
 
                 remote_relative = PurePosixPath(sanitized_path)
@@ -235,36 +241,45 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                 )
                 local_path = base_path / safe_relative
 
-                if local_data_root and file_path.startswith(f"{remote_data_root}/"):
+                if is_remote_local:
+                    if not local_data_root:
+                        message = (
+                            "LOCAL_BOT_API_DATA_DIR не настроен, хотя Bot API работает в режиме --local. "
+                            "Укажите путь к примонтированному каталогу данных (file_id=%s)."
+                        ) % file_id
+                        logger.error(message)
+                        raise LocalBotAPIConfigurationError(message)
+
                     source_path = _resolve_local_path(local_data_root, remote_relative)
-                    if source_path and source_path.exists():
-                        if local_path.exists():
-                            logger.debug(
-                                "Файл %s уже скопирован локально: %s", file_id, local_path
-                            )
-                            return str(local_path)
-                        local_path.parent.mkdir(parents=True, exist_ok=True)
-                        try:
-                            await asyncio.to_thread(shutil.copy2, source_path, local_path)
-                            logger.debug(
-                                "Файл %s скопирован из локального каталога %s в %s",
-                                file_id,
-                                source_path,
-                                local_path,
-                            )
-                            return str(local_path)
-                        except Exception as copy_exc:
-                            logger.warning(
-                                "Не удалось скопировать файл %s из %s: %s",
-                                file_id,
-                                source_path,
-                                copy_exc,
-                            )
-                    else:
-                        logger.warning(
-                            "Файл %s отсутствует в локальном каталоге Bot API (relative: %s)",
+                    if not source_path or not source_path.exists():
+                        formatted_message = (
+                            "Файл %s отсутствует в локальном каталоге Bot API (%s). "
+                            "Проверьте параметр LOCAL_BOT_API_DATA_DIR и монтирование тома."
+                        ) % (file_id, remote_relative)
+                        logger.error(formatted_message)
+                        raise LocalBotAPIConfigurationError(formatted_message)
+
+                    if local_path.exists():
+                        logger.debug(
+                            "Файл %s уже скопирован локально: %s", file_id, local_path
+                        )
+                        return str(local_path)
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        await asyncio.to_thread(shutil.copy2, source_path, local_path)
+                        logger.debug(
+                            "Файл %s скопирован из локального каталога %s в %s",
                             file_id,
-                            remote_relative,
+                            source_path,
+                            local_path,
+                        )
+                        return str(local_path)
+                    except Exception as copy_exc:
+                        logger.warning(
+                            "Не удалось скопировать файл %s из %s: %s",
+                            file_id,
+                            source_path,
+                            copy_exc,
                         )
 
                 if local_path.exists():
@@ -286,6 +301,8 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                         "Файл загружен через локальный HTTP и сохранён: %s", local_path
                     )
                 return str(local_path)
+        except LocalBotAPIConfigurationError:
+            raise
         except (ClientError, asyncio.TimeoutError) as exc:
             logger.warning(
                 "Локальный Telegram Bot API недоступен (%s), выполняем загрузку через публичный API",
@@ -742,6 +759,22 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
             f"Видео принято от @{message.from_user.username} (ID: {message.from_user.id}), file_id: {message.video.file_id}, local_path: {compressed_path}"
         )
         await state.set_state(AdminResponse.exam_photo)
+    except LocalBotAPIConfigurationError as config_error:
+        logger.error(
+            "Ошибка конфигурации локального Bot API при обработке видео от @%s: %s",
+            message.from_user.username,
+            config_error,
+        )
+        await message.answer(
+            "Локальный Bot API работает в режиме --local, но путь к данным не настроен. "
+            "Укажите LOCAL_BOT_API_DATA_DIR и примонтируйте каталог перед повторной загрузкой.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+                ]
+            ),
+        )
+        await state.clear()
     except Exception as e:
         logger.error(f"Ошибка обработки видео от @{message.from_user.username}: {e}")
         await message.answer(

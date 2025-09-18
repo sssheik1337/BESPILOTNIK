@@ -82,9 +82,11 @@ async def compress_video(
 
     original_size = source_path.stat().st_size
     best_output: Optional[Path] = None
+    temp_outputs: set[Path] = set()
 
     for crf in crf_levels:
         temp_output = source_path.with_name(f"{source_path.stem}_compressed_{crf}.mp4")
+        temp_outputs.add(temp_output)
         compressed = await _run_ffmpeg(source_path, temp_output, crf=crf)
         if not compressed or not compressed.exists():
             continue
@@ -99,6 +101,8 @@ async def compress_video(
         )
 
         if compressed.stat().st_size < original_size:
+            if best_output and best_output != compressed and best_output.exists():
+                best_output.unlink(missing_ok=True)
             best_output = compressed
         else:
             logger.debug(
@@ -123,6 +127,9 @@ async def compress_video(
         best_output = compressed
 
     if not best_output:
+        for artifact in temp_outputs:
+            if artifact.exists():
+                artifact.unlink(missing_ok=True)
         logger.warning(
             "Не удалось сжать видео %s, используется исходный файл.", input_file
         )
@@ -149,3 +156,7 @@ async def compress_video(
         # В случае ошибки откатываемся к исходному пути
         best_output.unlink(missing_ok=True)
         return input_file
+    finally:
+        for artifact in temp_outputs:
+            if artifact.exists() and artifact != final_path:
+                artifact.unlink(missing_ok=True)
