@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from aiogram import Router, F, Bot
@@ -72,6 +73,12 @@ class LocalBotAPIConfigurationError(RuntimeError):
     """Возникает, когда локальный Bot API запущен в режиме --local без корректного каталога данных."""
 
 
+@dataclass
+class DownloadResult:
+    local_path: str
+    source_path: Optional[Path] = None
+
+
 
 class AdminResponse(StatesGroup):
     add_channel = State()
@@ -123,6 +130,7 @@ def _safe_log_arg(arg):
         arg = str(arg)
     if isinstance(arg, str):
         return arg.encode("ascii", errors="backslashreplace").decode("ascii")
+
     try:
         return str(arg)
     except Exception:
@@ -131,6 +139,24 @@ def _safe_log_arg(arg):
 
 def _safe_log_args(*args):
     return tuple(_safe_log_arg(arg) for arg in args)
+
+
+async def _cleanup_source_file(path: Optional[Path]) -> None:
+    if not path:
+        return
+
+    def _remove(target: Path) -> None:
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            return
+        except Exception as exc:  # pragma: no cover - диагностика окружения
+            logger.warning(
+                "Не удалось удалить исходный файл %s: %s",
+                *_safe_log_args(target, exc),
+            )
+
+    await asyncio.to_thread(_remove, path)
 
 
 def _candidate_component_names(component: str) -> List[str]:
@@ -182,7 +208,7 @@ def _resolve_local_path(local_data_root: Path, remote_relative: PurePosixPath) -
     return current_paths[0] if current_paths else None
 
 
-async def download_from_local_api(file_id: str, token: str, base_dir: str) -> str:
+async def download_from_local_api(file_id: str, token: str, base_dir: str) -> DownloadResult:
     base_path = Path(base_dir)
     base_path.mkdir(parents=True, exist_ok=True)
 
@@ -194,7 +220,7 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
     async def _download_via_telegram(
         session: aiohttp.ClientSession,
         preferred_relative: Optional[PurePosixPath],
-    ) -> str:
+    ) -> DownloadResult:
         logger.info(
             "Локальный бот API недоступен, загружаем файл %s через публичный API Telegram",
             file_id,
@@ -230,7 +256,7 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
             "Файл %s загружен через Telegram API: %s",
             *_safe_log_args(file_id, destination),
         )
-        return str(destination)
+        return DownloadResult(str(destination))
 
     remote_relative: Optional[PurePosixPath] = None
 
@@ -298,7 +324,8 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                             "Файл %s уже скопирован локально: %s",
                             *_safe_log_args(file_id, local_path),
                         )
-                        return str(local_path)
+                        return DownloadResult(str(local_path))
+
                     local_path.parent.mkdir(parents=True, exist_ok=True)
                     try:
                         await asyncio.to_thread(shutil.copy2, source_path, local_path)
@@ -306,7 +333,7 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                             "Файл %s скопирован из локального каталога %s в %s",
                             *_safe_log_args(file_id, source_path, local_path),
                         )
-                        return str(local_path)
+                        return DownloadResult(str(local_path), source_path)
                     except Exception as copy_exc:
                         logger.warning(
                             "Не удалось скопировать файл %s из %s: %s",
@@ -317,7 +344,7 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                     logger.debug(
                         "Файл найден локально: %s", *_safe_log_args(local_path)
                     )
-                    return str(local_path)
+                    return DownloadResult(str(local_path))
 
                 url = f"{file_base_url}/{remote_relative.as_posix()}"
                 async with session.get(url, ssl=False) as file_resp:
@@ -334,7 +361,7 @@ async def download_from_local_api(file_id: str, token: str, base_dir: str) -> st
                         "Файл загружен через локальный HTTP и сохранён: %s",
                         *_safe_log_args(local_path),
                     )
-                return str(local_path)
+                return DownloadResult(str(local_path))
         except LocalBotAPIConfigurationError:
             raise
         except (ClientError, asyncio.TimeoutError) as exc:
@@ -729,6 +756,8 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
         await state.clear()
         return
 
+    download_result: Optional[DownloadResult] = None
+
     try:
         if message.video.file_size > 2_000_000_000:  # Проверка размера (2 ГБ)
             await message.answer(
@@ -770,11 +799,12 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
             await state.clear()
             return
 
-        local_path = await download_from_local_api(
+        download_result = await download_from_local_api(
             file_id=message.video.file_id,
             token=TOKEN,
             base_dir=LOCAL_BOT_API_CACHE_DIR,
         )
+        local_path = download_result.local_path
         progress_message = await message.answer(
             "Видео получено. Выполняется сжатие, это может занять несколько минут..."
         )
@@ -844,6 +874,9 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
             ),
         )
         await state.clear()
+    finally:
+        if download_result:
+            await _cleanup_source_file(download_result.source_path)
 
 
 @router.message(StateFilter(AdminResponse.exam_photo))

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import subprocess
 from pathlib import Path
 from time import perf_counter
 from typing import Optional
@@ -45,26 +46,29 @@ async def _probe_duration(path: Path) -> Optional[float]:
 async def _run_ffmpeg_cmd(args: list[str], description: str) -> None:
     """Запускает ffmpeg с указанными аргументами и логирует результат."""
 
-    start = perf_counter()
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except FileNotFoundError as exc:  # pragma: no cover - зависит от окружения
-        raise FileNotFoundError("Исполняемый файл ffmpeg не найден") from exc
+    def _execute() -> tuple[float, str, str, int]:
+        start = perf_counter()
+        try:
+            completed = subprocess.run(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        except FileNotFoundError as exc:  # pragma: no cover - зависит от окружения
+            raise FileNotFoundError("Исполняемый файл ffmpeg не найден") from exc
 
-    stdout, stderr = await process.communicate()
-    duration = perf_counter() - start
+        duration = perf_counter() - start
+        stdout_text = completed.stdout.decode(errors="ignore")
+        stderr_text = completed.stderr.decode(errors="ignore")
+        return duration, stdout_text, stderr_text, completed.returncode
 
-    stdout_text = stdout.decode(errors="ignore")
-    stderr_text = stderr.decode(errors="ignore")
+    duration, stdout_text, stderr_text, returncode = await asyncio.to_thread(_execute)
 
-    if process.returncode != 0:
+    if returncode != 0:
         logger.error(
             "FFmpeg завершился с кодом %s (%s) за %.2f с: %s",
-            process.returncode,
+            returncode,
             description,
             duration,
             stderr_text,
