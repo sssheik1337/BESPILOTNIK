@@ -1,8 +1,9 @@
 import asyncio
 import logging
+import os
 from pathlib import Path
 from time import perf_counter
-from typing import Iterable, Optional
+from typing import Optional
 
 import ffmpeg
 
@@ -10,174 +11,217 @@ import ffmpeg
 logger = logging.getLogger(__name__)
 
 
-async def _run_ffmpeg(
-    input_path: Path,
-    output_path: Path,
-    crf: int,
-    preset: str = "medium",
-) -> Optional[Path]:
-    """Запускает перекодирование видео и возвращает путь к сжатому файлу."""
+class _FFmpegExecutionError(RuntimeError):
+    """Обёртка для ошибок запуска ffmpeg."""
 
-    def _encode() -> tuple[bytes, bytes]:
-        stream = (
-            ffmpeg.input(str(input_path))
-            .output(
-                str(output_path),
-                vcodec="libx264",
-                preset=preset,
-                crf=crf,
-                acodec="aac",
-                audio_bitrate="128k",
-                vf="scale='min(1280,iw)':-2",
+
+def _null_sink() -> str:
+    return "NUL" if os.name == "nt" else "/dev/null"
+
+
+async def _probe_duration(path: Path) -> Optional[float]:
+    """Возвращает длительность ролика в секундах."""
+
+    def _probe() -> Optional[float]:
+        try:
+            info = ffmpeg.probe(str(path))
+        except ffmpeg.Error as exc:  # pragma: no cover - ffprobe сообщает stderr
+            logger.error(
+                "Не удалось получить длительность %s: %s",
+                path,
+                exc.stderr.decode(errors="ignore") if exc.stderr else exc,
             )
-            .overwrite_output()
-        )
-        return stream.run(capture_stdout=True, capture_stderr=True)
+            return None
+        duration = info.get("format", {}).get("duration")
+        try:
+            return float(duration) if duration is not None else None
+        except (TypeError, ValueError):
+            logger.error("Некорректная длительность %s: %s", path, duration)
+            return None
+
+    return await asyncio.to_thread(_probe)
+
+
+async def _run_ffmpeg_cmd(args: list[str], description: str) -> None:
+    """Запускает ffmpeg с указанными аргументами и логирует результат."""
 
     start = perf_counter()
-
     try:
-        stdout, stderr = await asyncio.to_thread(_encode)
-        duration = perf_counter() - start
-        logger.debug(
-            "FFmpeg завершил перекодирование %s (CRF=%s) за %.2f с: stdout=%s, stderr=%s",
-            input_path,
-            crf,
-            duration,
-            stdout.decode(errors="ignore"),
-            stderr.decode(errors="ignore"),
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-    except ffmpeg.Error as exc:
-        logger.error(
-            "Ошибка ffmpeg при перекодировании %s (CRF=%s): %s",
-            input_path,
-            crf,
-            exc.stderr.decode(errors="ignore") if exc.stderr else exc,
-        )
-        if output_path.exists():
-            output_path.unlink(missing_ok=True)
-        return None
-    except FileNotFoundError:
-        logger.error(
-            "Исполняемый файл ffmpeg не найден. Проверьте, что он установлен в системе."
-        )
-        if output_path.exists():
-            output_path.unlink(missing_ok=True)
-        return None
-    except Exception:  # pragma: no cover - защитный блок
-        logger.exception("Неизвестная ошибка ffmpeg при обработке %s", input_path)
-        if output_path.exists():
-            output_path.unlink(missing_ok=True)
-        return None
+    except FileNotFoundError as exc:  # pragma: no cover - зависит от окружения
+        raise FileNotFoundError("Исполняемый файл ffmpeg не найден") from exc
 
-    return output_path if output_path.exists() else None
+    stdout, stderr = await process.communicate()
+    duration = perf_counter() - start
+
+    stdout_text = stdout.decode(errors="ignore")
+    stderr_text = stderr.decode(errors="ignore")
+
+    if process.returncode != 0:
+        logger.error(
+            "FFmpeg завершился с кодом %s (%s) за %.2f с: %s",
+            process.returncode,
+            description,
+            duration,
+            stderr_text,
+        )
+        raise _FFmpegExecutionError(stderr_text or description)
+
+    logger.debug(
+        "FFmpeg завершил %s за %.2f с: stdout=%s, stderr=%s",
+        description,
+        duration,
+        stdout_text,
+        stderr_text,
+    )
+
+
+def _cleanup_pass_logs(passlog: Path) -> None:
+    prefix = passlog.name
+    parent = passlog.parent
+    for artifact in parent.glob(f"{prefix}*"):
+        artifact.unlink(missing_ok=True)
 
 
 async def compress_video(
     input_file: str,
-    target_size_mb: int = 100,
-    crf_levels: Iterable[int] = (28, 32, 36),
+    target_size_mb: int = 75,
+    audio_bitrate_kbps: int = 96,
+    preset: str = "slow",
 ) -> str:
-    """Сжимает видео до целевого размера и возвращает путь к итоговому файлу."""
+    """Сжимает видео до заданного размера (≈target_size_mb) и возвращает итоговый путь."""
 
     source_path = Path(input_file)
     if not source_path.exists():
         logger.warning("Файл для сжатия не найден: %s", input_file)
         return input_file
 
+    target_bytes = target_size_mb * 1024 * 1024
     original_size = source_path.stat().st_size
-    best_output: Optional[Path] = None
-    temp_outputs: set[Path] = set()
-    crf_levels = tuple(crf_levels)
-    total_attempts = len(crf_levels)
-    if total_attempts == 0:
-        logger.warning(
-            "Список уровней CRF пуст при сжатии %s. Возвращаем исходный файл.",
+    if original_size <= target_bytes and source_path.suffix.lower() == ".mp4":
+        logger.debug(
+            "Файл %s уже меньше целевого размера (%.2f МБ), сжатие не требуется",
             input_file,
+            original_size / (1024 * 1024),
         )
         return input_file
 
-    original_size_mb = original_size / (1024 * 1024)
     logger.info(
-        "Начинаем сжатие видео %s (%.2f МБ). Целевой размер: %s МБ",
+        "Начинаем двухпроходное сжатие %s (%.2f МБ) до ~%s МБ",
         input_file,
-        original_size_mb,
+        original_size / (1024 * 1024),
         target_size_mb,
     )
 
+    duration = await _probe_duration(source_path)
+    if not duration or duration <= 0:
+        logger.warning("Не удалось определить длительность %s. Используем исходный файл", input_file)
+        return input_file
+
+    # Расчёт битрейта
+    reserve_ratio = 0.96
+    audio_bitrate = max(audio_bitrate_kbps, 32) * 1000
+    total_bits_budget = target_bytes * 8 * reserve_ratio
+    video_bits = total_bits_budget - audio_bitrate * duration
+    min_video_bitrate_kbps = 300
+    if video_bits <= 0:
+        logger.warning(
+            "Недостаточно бюджета битрейта для %s, используем минимальный уровень",
+            input_file,
+        )
+        video_bitrate_kbps = min_video_bitrate_kbps
+    else:
+        video_bitrate_kbps = max(int(video_bits / duration / 1000), min_video_bitrate_kbps)
+
+    maxrate_kbps = int(video_bitrate_kbps * 1.45)
+    bufsize_kbps = int(video_bitrate_kbps * 3)
+
+    logger.info(
+        "Битрейты для %s: видео ~%s kbps, макс %s kbps, буфер %s kbps, аудио %s kbps",
+        input_file,
+        video_bitrate_kbps,
+        maxrate_kbps,
+        bufsize_kbps,
+        audio_bitrate_kbps,
+    )
+
+    temp_output = source_path.with_name(f"{source_path.stem}_compressed.mp4")
+    passlog = source_path.with_name(f"{source_path.stem}_passlog")
+    null_output = _null_sink()
+
+    base_args = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source_path),
+        "-c:v",
+        "libx264",
+        "-b:v",
+        f"{video_bitrate_kbps}k",
+        "-maxrate",
+        f"{maxrate_kbps}k",
+        "-bufsize",
+        f"{bufsize_kbps}k",
+        "-preset",
+        preset,
+        "-vf",
+        "scale='min(1280,iw)':-2",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-passlogfile",
+        str(passlog),
+    ]
+
     start_time = perf_counter()
 
-    for attempt_index, crf in enumerate(crf_levels, start=1):
-        temp_output = source_path.with_name(f"{source_path.stem}_compressed_{crf}.mp4")
-        temp_outputs.add(temp_output)
-        attempt_started = perf_counter()
-        logger.info(
-            "Запуск ffmpeg для %s с CRF=%s (попытка %s/%s)",
-            input_file,
-            crf,
-            attempt_index,
-            total_attempts,
-        )
-        compressed = await _run_ffmpeg(source_path, temp_output, crf=crf)
-        if not compressed or not compressed.exists():
-            logger.info(
-                "FFmpeg не создал сжатый файл для %s при CRF=%s. Продолжаем попытки.",
-                input_file,
-                crf,
-            )
-            continue
+    try:
+        logger.info("FFmpeg pass 1 для %s", input_file)
+        pass1_args = base_args + ["-an", "-pass", "1", "-f", "mp4", null_output]
+        await _run_ffmpeg_cmd(pass1_args, f"pass1 {source_path.name}")
 
-        size_mb = compressed.stat().st_size / (1024 * 1024)
-        logger.info(
-            "Получен файл %s размером %.2f МБ за %.2f с",
-            compressed,
-            size_mb,
-            perf_counter() - attempt_started,
+        logger.info("FFmpeg pass 2 для %s", input_file)
+        pass2_args = base_args + [
+            "-c:a",
+            "aac",
+            "-b:a",
+            f"{audio_bitrate_kbps}k",
+            "-pass",
+            "2",
+            str(temp_output),
+        ]
+        await _run_ffmpeg_cmd(pass2_args, f"pass2 {source_path.name}")
+    except FileNotFoundError:
+        logger.error(
+            "Исполняемый файл ffmpeg не найден. Проверьте, что он установлен в системе."
         )
-        logger.debug(
-            "Получен файл %s размером %.2f МБ для %s при CRF=%s",
-            compressed,
-            size_mb,
-            input_file,
-            crf,
-        )
-
-        if compressed.stat().st_size < original_size:
-            if best_output and best_output != compressed and best_output.exists():
-                best_output.unlink(missing_ok=True)
-            best_output = compressed
-        else:
-            logger.debug(
-                "Сжатый файл не меньше исходного: %s >= %s",
-                compressed.stat().st_size,
-                original_size,
-            )
-            compressed.unlink(missing_ok=True)
-            continue
-
-        if size_mb <= target_size_mb:
-            logger.info(
-                "Видео %s сжато до %.2f МБ при CRF=%s", input_file, size_mb, crf
-            )
-            break
-        logger.info(
-            "После CRF=%s размер %.2f МБ превышает лимит %s МБ, пробуем ниже качество",
-            crf,
-            size_mb,
-            target_size_mb,
-        )
-        best_output = compressed
-
-    if not best_output:
-        for artifact in temp_outputs:
-            if artifact.exists():
-                artifact.unlink(missing_ok=True)
-        logger.warning(
-            "Не удалось сжать видео %s, используется исходный файл (время обработки %.2f с).",
-            input_file,
-            perf_counter() - start_time,
-        )
+        temp_output.unlink(missing_ok=True)
         return input_file
+    except _FFmpegExecutionError:
+        temp_output.unlink(missing_ok=True)
+        return input_file
+    finally:
+        _cleanup_pass_logs(passlog)
+
+    if not temp_output.exists():
+        logger.warning("FFmpeg не создал выходной файл для %s", input_file)
+        return input_file
+
+    final_size_mb = temp_output.stat().st_size / (1024 * 1024)
+    logger.info(
+        "Видео %s сжато до %.2f МБ за %.2f с",
+        input_file,
+        final_size_mb,
+        perf_counter() - start_time,
+    )
 
     final_path = (
         source_path
@@ -187,21 +231,9 @@ async def compress_video(
 
     try:
         source_path.unlink(missing_ok=True)
-        best_output.replace(final_path)
-        logger.info(
-            "Видео %s успешно сжато и сохранено как %s (%.2f МБ) за %.2f с",
-            input_file,
-            final_path,
-            final_path.stat().st_size / (1024 * 1024),
-            perf_counter() - start_time,
-        )
+        temp_output.replace(final_path)
         return str(final_path)
-    except Exception:
-        logger.exception("Ошибка при замене файла %s на сжатый вариант", input_file)
-        # В случае ошибки откатываемся к исходному пути
-        best_output.unlink(missing_ok=True)
+    except Exception:  # pragma: no cover - защитный блок
+        logger.exception("Не удалось заменить исходный файл %s", input_file)
+        temp_output.unlink(missing_ok=True)
         return input_file
-    finally:
-        for artifact in temp_outputs:
-            if artifact.exists() and artifact != final_path:
-                artifact.unlink(missing_ok=True)
