@@ -49,6 +49,8 @@ from config import (
     LOCAL_BOT_API_DATA_DIR,
     LOCAL_BOT_API_REMOTE_DIR,
     LOCAL_BOT_API_CACHE_DIR,
+    EXAM_VIDEOS_DIR,
+    EXAM_PHOTOS_DIR,
 )
 from datetime import datetime
 import logging
@@ -63,6 +65,7 @@ import aiohttp
 from aiohttp import ClientError
 import shutil
 from pathlib import PurePosixPath
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +142,51 @@ def _safe_log_arg(arg):
 
 def _safe_log_args(*args):
     return tuple(_safe_log_arg(arg) for arg in args)
+
+
+def _sanitize_filename_component(value: str) -> str:
+    replaced = _replace_colon_variants(value or "", " ")
+    cleaned = re.sub(r"[\s]+", "_", replaced.strip())
+    cleaned = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_\-]", "_", cleaned)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    return cleaned or "media"
+
+
+def _exam_media_basename(fio: str, training_center: str) -> str:
+    fio_component = _sanitize_filename_component(fio)
+    center_component = _sanitize_filename_component(training_center)
+    return "_".join(part for part in [fio_component, center_component] if part)
+
+
+def _ensure_unique_media_path(directory: Path, base_name: str, suffix: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    candidate = directory / f"{base_name}{suffix}"
+    counter = 1
+    while candidate.exists():
+        candidate = directory / f"{base_name}_{counter}{suffix}"
+        counter += 1
+    return candidate
+
+
+async def _resolve_training_center_name(
+    state: FSMContext,
+    state_data: dict,
+    db_pool,
+    training_center_id: int,
+) -> str:
+    name = state_data.get("training_center_name")
+    if name:
+        return name
+    fetched = None
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            fetched = await conn.fetchval(
+                "SELECT center_name FROM training_centers WHERE id = $1",
+                training_center_id,
+            )
+    name = fetched or f"УТЦ_{training_center_id}"
+    await state.update_data(training_center_name=name)
+    return name
 
 
 async def _cleanup_source_file(path: Optional[Path]) -> None:
@@ -418,7 +466,13 @@ async def select_exam_record(callback: CallbackQuery, state: FSMContext, **data)
     exam_id = int(callback.data.split("_")[-1])
     async with db_pool.acquire() as conn:
         record = await conn.fetchrow(
-            "SELECT * FROM exam_records WHERE exam_id = $1", exam_id
+            """
+            SELECT er.*, tc.center_name
+            FROM exam_records er
+            LEFT JOIN training_centers tc ON er.training_center_id = tc.id
+            WHERE er.exam_id = $1
+            """,
+            exam_id,
         )
         if not record:
             await callback.message.edit_text(
@@ -447,6 +501,8 @@ async def select_exam_record(callback: CallbackQuery, state: FSMContext, **data)
         specialty=record["specialty"],
         contact=record["contact"],
         training_center_id=record["training_center_id"],
+        training_center_name=record.get("center_name")
+        or f"УТЦ_{record['training_center_id']}",
     )
     await callback.message.edit_text(
         "Прикрепите видео:",
@@ -830,7 +886,23 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
                         await progress_message.edit_text("Сжатие завершено ✅")
                 except TelegramBadRequest:
                     pass
-        await state.update_data(video_link=compressed_path)
+        fio = state_data.get("fio", "")
+        training_center_id = state_data.get("training_center_id")
+        training_center_name = await _resolve_training_center_name(
+            state,
+            state_data,
+            db_pool,
+            training_center_id,
+        ) if training_center_id is not None else _sanitize_filename_component("неизвестно")
+
+        compressed_file = Path(compressed_path)
+        suffix = compressed_file.suffix or ".mp4"
+        base_name = _exam_media_basename(fio, training_center_name)
+        final_path = _ensure_unique_media_path(Path(EXAM_VIDEOS_DIR), base_name, suffix)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        compressed_file.replace(final_path)
+
+        await state.update_data(video_link=final_path.name)
         await message.answer(
             "Видео принято. Загрузите фото (до 5 штук) или завершите.",
             reply_markup=InlineKeyboardMarkup(
@@ -844,7 +916,7 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
             ),
         )
         logger.debug(
-            f"Видео принято от @{message.from_user.username} (ID: {message.from_user.id}), file_id: {message.video.file_id}, local_path: {compressed_path}"
+            f"Видео принято от @{message.from_user.username} (ID: {message.from_user.id}), file_id: {message.video.file_id}, сохранено как {final_path.name}"
         )
         await state.set_state(AdminResponse.exam_photo)
     except LocalBotAPIConfigurationError as config_error:
@@ -880,26 +952,65 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
 
 
 @router.message(StateFilter(AdminResponse.exam_photo))
-async def process_exam_photo(message: Message, state: FSMContext):
+async def process_exam_photo(message: Message, state: FSMContext, **data):
     data_state = await state.get_data()
     photo_links = data_state.get("photo_links", [])
-    bot = Bot(token=TOKEN)
+    db_pool = data.get("db_pool")
     if message.photo:
-        photo_file = await bot.get_file(message.photo[-1].file_id)
-        photo_link = f"https://api.telegram.org/file/bot{TOKEN}/{photo_file.file_path}"
-        photo_links.append(photo_link)
-        await state.update_data(photo_links=photo_links)
-        await message.answer(
-            f"Фото добавлено ({len(photo_links)}/10). Прикрепите ещё или нажмите 'Готово':",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="Готово", callback_data="finish_exam")]
-                ]
-            ),
-        )
-        logger.debug(
-            f"Фото добавлено для экзамена от @{message.from_user.username} (ID: {message.from_user.id})"
-        )
+        download_result = None
+        try:
+            download_result = await download_from_local_api(
+                file_id=message.photo[-1].file_id,
+                token=TOKEN,
+                base_dir=str(Path(LOCAL_BOT_API_CACHE_DIR) / "photos"),
+            )
+            source_path = Path(download_result.local_path)
+            suffix = source_path.suffix or ".jpg"
+            fio = data_state.get("fio", "")
+            training_center_id = data_state.get("training_center_id")
+            training_center_name = await _resolve_training_center_name(
+                state,
+                data_state,
+                db_pool,
+                training_center_id,
+            ) if training_center_id is not None else _sanitize_filename_component("центр")
+            base_name = _exam_media_basename(fio, training_center_name)
+            indexed_base = f"{base_name}_{len(photo_links) + 1}"
+            final_path = _ensure_unique_media_path(
+                Path(EXAM_PHOTOS_DIR), indexed_base, suffix
+            )
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.replace(final_path)
+            photo_links.append(final_path.name)
+            await state.update_data(photo_links=photo_links)
+            await message.answer(
+                f"Фото добавлено ({len(photo_links)}/10). Прикрепите ещё или нажмите 'Готово':",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="Готово", callback_data="finish_exam")]
+                    ]
+                ),
+            )
+            logger.debug(
+                f"Фото добавлено для экзамена от @{message.from_user.username} (ID: {message.from_user.id}), сохранено как {final_path.name}"
+            )
+        except Exception as exc:
+            logger.error(
+                "Ошибка сохранения фото для экзамена от @%s: %s",
+                message.from_user.username,
+                exc,
+            )
+            await message.answer(
+                "Не удалось сохранить фото. Попробуйте снова или завершите без фото.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="Готово", callback_data="finish_exam")]
+                    ]
+                ),
+            )
+        finally:
+            if download_result:
+                await _cleanup_source_file(download_result.source_path)
     else:
         await message.answer(
             "Пожалуйста, прикрепите фото или нажмите 'Готово'.",
@@ -912,7 +1023,6 @@ async def process_exam_photo(message: Message, state: FSMContext):
         logger.warning(
             f"Некорректный ввод фото для экзамена от @{message.from_user.username}"
         )
-    await bot.session.close()
 
 
 @router.callback_query(
@@ -954,7 +1064,16 @@ async def process_training_center(callback: CallbackQuery, state: FSMContext, **
         await callback.answer("Ошибка: сообщение не найдено.", show_alert=True)
         return
     training_center_id = int(callback.data.split("_")[-1])
-    await state.update_data(training_center_id=training_center_id)
+    center_name = None
+    async with db_pool.acquire() as conn:
+        center_name = await conn.fetchval(
+            "SELECT center_name FROM training_centers WHERE id = $1",
+            training_center_id,
+        )
+    await state.update_data(
+        training_center_id=training_center_id,
+        training_center_name=center_name or f"УТЦ_{training_center_id}",
+    )
     await callback.message.edit_text(
         "Прикрепите видео:",
         reply_markup=InlineKeyboardMarkup(

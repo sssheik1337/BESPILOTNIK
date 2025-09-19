@@ -180,9 +180,13 @@ async def create_tables():
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS manuals (
                 category TEXT PRIMARY KEY,
-                file_id TEXT
+                file_id TEXT,
+                file_name TEXT
             )
         """)
+        await conn.execute(
+            "ALTER TABLE manuals ADD COLUMN IF NOT EXISTS file_name TEXT"
+        )
     logger.info("Таблицы базы данных созданы или проверены")
 
 
@@ -799,26 +803,38 @@ async def get_defect_reports(serial=None, serial_from=None, serial_to=None):
         return reports
 
 
-async def set_manual_file(category, file_id):
+async def set_manual_file(category, file_name):
     async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO manuals (category, file_id)
-            VALUES ($1, $2)
-            ON CONFLICT (category) DO UPDATE SET file_id = EXCLUDED.file_id
-            """,
-            category,
-            file_id,
-        )
+        async with conn.transaction():
+            previous_file = await conn.fetchval(
+                "SELECT file_name FROM manuals WHERE category = $1",
+                category,
+            )
+            await conn.execute(
+                """
+                INSERT INTO manuals (category, file_name, file_id)
+                VALUES ($1, $2, NULL)
+                ON CONFLICT (category)
+                DO UPDATE SET file_name = EXCLUDED.file_name,
+                              file_id = EXCLUDED.file_id
+                """,
+                category,
+                file_name,
+            )
         logger.info(f"Файл руководства '{category}' обновлён")
+        return previous_file
 
 
 async def get_manual_file(category):
     async with pool.acquire() as conn:
-        file_id = await conn.fetchval(
-            "SELECT file_id FROM manuals WHERE category = $1", category
+        record = await conn.fetchrow(
+            "SELECT file_name, file_id FROM manuals WHERE category = $1",
+            category,
+        )
+        has_record = record is not None and (
+            record.get("file_name") or record.get("file_id")
         )
         logger.debug(
-            f"Запрошен файл руководства '{category}': {'найден' if file_id else 'отсутствует'}"
+            f"Запрошен файл руководства '{category}': {'найден' if has_record else 'отсутствует'}"
         )
-        return file_id
+        return dict(record) if record else None

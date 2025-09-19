@@ -11,8 +11,10 @@ from aiogram.types import (
 from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from pathlib import Path
+
 from keyboards.inline import get_user_menu, get_admin_menu, get_manuals_menu
-from config import MAIN_ADMIN_IDS
+from config import MAIN_ADMIN_IDS, MANUALS_STORAGE_DIR
 import logging
 import traceback
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -401,15 +403,35 @@ async def send_manual(callback: CallbackQuery):
         "manual_drone": "drone",
     }
     category = mapping.get(callback.data)
-    file_id = await get_manual_file(category)
+    manual_entry = await get_manual_file(category)
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="manuals")]
         ]
     )
     await callback.message.delete()
-    if file_id:
-        await callback.message.answer_document(file_id, reply_markup=keyboard)
+    if manual_entry:
+        file_name = manual_entry.get("file_name") if isinstance(manual_entry, dict) else None
+        file_id = manual_entry.get("file_id") if isinstance(manual_entry, dict) else None
+        if file_name:
+            file_path = Path(MANUALS_STORAGE_DIR) / file_name
+            if file_path.exists():
+                await callback.message.answer_document(
+                    FSInputFile(file_path), reply_markup=keyboard
+                )
+            else:
+                logger.warning(
+                    "Файл руководства %s (%s) не найден на диске",
+                    category,
+                    file_name,
+                )
+                await callback.message.answer(
+                    "Файл отсутствует на сервере.", reply_markup=keyboard
+                )
+        elif file_id:
+            await callback.message.answer_document(file_id, reply_markup=keyboard)
+        else:
+            await callback.message.answer("Файл отсутствует.", reply_markup=keyboard)
     else:
         await callback.message.answer("Файл отсутствует.", reply_markup=keyboard)
     await callback.answer()

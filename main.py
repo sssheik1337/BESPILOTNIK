@@ -36,6 +36,7 @@ logging.basicConfig(
         ),
     ],
 )
+logging.getLogger("aiohttp.server").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 db_lock = asyncio.Lock()

@@ -7,6 +7,10 @@ LOCAL_BOT_API_REMOTE_DIR = "/var/lib/telegram-bot-api"
 LOCAL_BOT_API_DATA_DIR = None
 # Каталог для локального кеша загруженных файлов (используется для сжатия видео и резервных копий)
 LOCAL_BOT_API_CACHE_DIR = "data/telegram_files"
+EXAM_MEDIA_ROOT = "data/exams"
+EXAM_VIDEOS_DIR = f"{EXAM_MEDIA_ROOT}/videos"
+EXAM_PHOTOS_DIR = f"{EXAM_MEDIA_ROOT}/photos"
+MANUALS_STORAGE_DIR = "data/manuals"
 API_BASE_URL = f"{LOCAL_BOT_API_HOST}/bot{{token}}/"
 API_FILE_BASE_URL = f"{LOCAL_BOT_API_HOST}/file/bot{{token}}/"
 NGROK_PUBLIC_URL = "https://10bdf31051e0.ngrok-free.app"  # Замени на адрес от ngrok
