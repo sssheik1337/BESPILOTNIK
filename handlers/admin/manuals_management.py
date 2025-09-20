@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 from aiogram.types import FSInputFile
+from aiogram.exceptions import TelegramBadRequest
 
 from keyboards.inline import get_manuals_admin_menu
 from database.db import get_manual_file, set_manual_file
@@ -52,7 +53,11 @@ def _sanitize_manual_filename(category: str, original: str) -> str:
 @router.callback_query(F.data == "manage_manuals")
 async def manage_manuals(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text(
+    try:
+        await callback.message.delete()
+    except TelegramBadRequest:
+        pass
+    await callback.message.answer(
         "Выберите руководство для загрузки:", reply_markup=get_manuals_admin_menu()
     )
     await callback.answer()
@@ -73,27 +78,41 @@ async def prompt_manual_upload(callback: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_manuals")]
         ]
     )
-    prompt_text = "Отправьте файл руководства."
-    if current_file_name:
-        prompt_text += f"\nТекущая версия: {current_file_name}"
-        current_path = manuals_dir / current_file_name
-        if current_path.exists():
-            try:
-                await callback.message.answer_document(
-                    FSInputFile(current_path),
-                    caption="Текущая версия руководства",
-                    reply_markup=reply_markup,
-                )
-            except Exception as exc:  # pragma: no cover - защитное логирование
-                logger.warning(
-                    "Не удалось отправить текущее руководство %s: %s",
-                    current_file_name,
-                    exc,
-                )
-    else:
-        prompt_text += "\nТекущая версия отсутствует."
 
-    await callback.message.edit_text(prompt_text, reply_markup=reply_markup)
+    prompt_lines = ["Отправьте файл руководства."]
+    current_path = None
+    if current_file_name:
+        prompt_lines.append(f"Текущая версия: {current_file_name}")
+        candidate = manuals_dir / current_file_name
+        if candidate.exists():
+            current_path = candidate
+    else:
+        prompt_lines.append("Текущая версия отсутствует.")
+
+    prompt_text = "\n".join(prompt_lines)
+
+    try:
+        await callback.message.delete()
+    except TelegramBadRequest:
+        pass
+
+    if current_path is not None:
+        try:
+            await callback.message.answer_document(
+                FSInputFile(current_path),
+                caption=f"{prompt_text}\n\nТекущая версия руководства во вложении.",
+                reply_markup=reply_markup,
+            )
+        except Exception as exc:  # pragma: no cover - защитное логирование
+            logger.warning(
+                "Не удалось отправить текущее руководство %s: %s",
+                current_file_name,
+                exc,
+            )
+            await callback.message.answer(prompt_text, reply_markup=reply_markup)
+    else:
+        await callback.message.answer(prompt_text, reply_markup=reply_markup)
+
     await state.set_state(ManualUpload.waiting_for_file)
     await callback.answer()
 
