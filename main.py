@@ -36,6 +36,7 @@ logging.basicConfig(
         ),
     ],
 )
+logging.getLogger("aiohttp.server").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 db_lock = asyncio.Lock()
@@ -91,8 +92,26 @@ class SerialCheckMiddleware(BaseMiddleware):
             logger.debug("Не удалось определить user_id, пропускаем событие")
             return await handler(update, data)
 
-        state = data["state"]
-        current_state = await state.get_state()
+        state = data.get("state")
+        if state is None:
+            logger.debug(
+                "FSM context is unavailable for событие %s, пропускаем проверку серийника",
+                type(event).__name__,
+            )
+            return await handler(update, data)
+
+        try:
+            current_state = await state.get_state()
+        except Exception as exc:  # pragma: no cover - защитная логика на случай ошибок FSM
+            logger.warning(
+                "Не удалось получить состояние FSM (%s) для пользователя %s (ID %s): %s",
+                type(event).__name__,
+                f"@{username}",
+                user_id,
+                exc,
+            )
+            return await handler(update, data)
+
         logger.debug(f"SerialCheckMiddleware: Текущее состояние FSM: {current_state}")
 
         is_fsm_state = current_state and (
@@ -101,6 +120,7 @@ class SerialCheckMiddleware(BaseMiddleware):
             or current_state.startswith("AppealForm:")
             or current_state.startswith("AdminResponse:")
             or current_state.startswith("BaseManagement:")
+            or current_state.startswith("ManualUpload:")
         )
         if is_fsm_state:
             logger.debug(

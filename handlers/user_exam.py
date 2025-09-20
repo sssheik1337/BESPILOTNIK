@@ -8,6 +8,7 @@ from aiogram.types import (
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import StateFilter
+from datetime import datetime
 from database.db import (
     get_training_centers,
     add_exam_record,
@@ -394,15 +395,17 @@ async def process_training_center(callback: CallbackQuery, state: FSMContext, **
                 exam_id, None, None
             )  # Пользователь не добавляет медиа
         else:
+            now_str = datetime.now().strftime("%Y-%m-%dT%H:%M")
             await add_exam_record(
-                fio,
-                subdivision,
-                military_unit,
-                callsign,
-                specialty,
-                contact,
-                personal_number,
-                center_id,
+                fio=fio,
+                subdivision=subdivision,
+                military_unit=military_unit,
+                callsign=callsign,
+                specialty=specialty,
+                contact=contact,
+                personal_number=personal_number,
+                training_center_id=center_id,
+                application_date=now_str,
             )
         await callback.message.edit_text(
             f"Вы успешно записаны на обучение в {center['center_name']}!\n"
