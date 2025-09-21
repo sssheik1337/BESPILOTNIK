@@ -134,6 +134,49 @@ def get_my_appeals_user_menu(appeals):
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
+def get_user_appeal_actions_menu(
+    appeal_id: int, status: str, media_count: int, include_view_button: bool = False
+) -> InlineKeyboardMarkup:
+    keyboard: list[list[InlineKeyboardButton]] = []
+    if include_view_button:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text="📄 Просмотреть заявку",
+                    callback_data=f"view_appeal_user_{appeal_id}",
+                )
+            ]
+        )
+    if media_count > 0:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=f"📸 Медиа ({media_count})",
+                    callback_data=f"show_media_user_{appeal_id}",
+                )
+            ]
+        )
+    if status != "closed":
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text="💬 Ответить", callback_data=f"reply_user_{appeal_id}"
+                )
+            ]
+        )
+    if status in ["new", "in_progress"]:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text="Закрыть заявку",
+                    callback_data=f"close_appeal_user_{appeal_id}",
+                )
+            ]
+        )
+    keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
 def get_open_appeals_menu(appeals, page, total_appeals):
     keyboard = []
     for appeal in appeals:
