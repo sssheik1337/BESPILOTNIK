@@ -98,7 +98,7 @@ def get_admin_menu(user_id):
     keyboard.append(
         [
             InlineKeyboardButton(
-                text="🛠 Брак/Возврат/Замена", callback_data="defect_menu"
+                text="🛠 Ремонт/Замена", callback_data="defect_menu"
             )
         ]
     )
@@ -211,7 +211,7 @@ def get_open_appeals_menu(appeals, page, total_appeals):
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def get_appeal_actions_menu(appeal_id, status):
+def get_appeal_actions_menu(appeal_id, status, can_service: bool = False):
     keyboard = []
     if status == "new":
         keyboard.append(
@@ -243,7 +243,26 @@ def get_appeal_actions_menu(appeal_id, status):
                 ],
             ]
         )
+        if can_service:
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        text="🔧 Ремонт",
+                        callback_data=f"repair_appeal_{appeal_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="🔁 Замена",
+                        callback_data=f"replace_appeal_{appeal_id}",
+                    ),
+                ]
+            )
     keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+    logger.debug(
+        "Создана клавиатура действий по заявке №%s (статус=%s, сервисные кнопки=%s)",
+        appeal_id,
+        status,
+        can_service,
+    )
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
@@ -486,17 +505,12 @@ def get_defect_status_menu(serial):
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Брак", callback_data=f"defect_status_brak_{serial}"
+                    text="Ремонт", callback_data=f"defect_status_repair_{serial}"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="Возврат", callback_data=f"defect_status_vozvrat_{serial}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Замена", callback_data=f"defect_status_zamena_{serial}"
+                    text="Замена", callback_data=f"defect_status_replacement_{serial}"
                 )
             ],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")],

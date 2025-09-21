@@ -128,10 +128,14 @@ async def create_tables():
                 FOREIGN KEY (serial) REFERENCES serials (serial)
             )
         """)
-        await conn.execute("""
+        await conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS defect_reports (
                 report_id SERIAL PRIMARY KEY,
                 serial TEXT,
+                new_serial TEXT,
+                action TEXT,
+                comment TEXT,
                 report_date TEXT,
                 report_time TEXT,
                 location TEXT,
@@ -140,7 +144,17 @@ async def create_tables():
                 FOREIGN KEY (serial) REFERENCES serials (serial),
                 FOREIGN KEY (employee_id) REFERENCES admins (admin_id)
             )
-        """)
+            """
+        )
+        await conn.execute(
+            "ALTER TABLE defect_reports ADD COLUMN IF NOT EXISTS new_serial TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE defect_reports ADD COLUMN IF NOT EXISTS action TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE defect_reports ADD COLUMN IF NOT EXISTS comment TEXT"
+        )
         await conn.execute("""
                     CREATE TABLE IF NOT EXISTS exam_records (
                         exam_id SERIAL PRIMARY KEY,
@@ -703,7 +717,8 @@ async def start_replacement(appeal_id, old_serial, status="replacement_process")
                 "UPDATE appeals SET status = $1 WHERE appeal_id = $2", status, appeal_id
             )
             await conn.execute(
-                "UPDATE serials SET return_status = 'Возврат' WHERE serial = $1",
+                "UPDATE serials SET return_status = $1 WHERE serial = $2",
+                "replacement",
                 old_serial,
             )
             logger.info(
@@ -768,19 +783,48 @@ async def get_closed_appeals(page=0, limit=10):
 
 
 async def add_defect_report(
-    serial, report_date, report_time, location, media_links, employee_id
+    serial,
+    report_date,
+    report_time,
+    location,
+    media_links,
+    employee_id,
+    action,
+    new_serial=None,
+    comment=None,
 ):
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO defect_reports (serial, report_date, report_time, location, media_links, employee_id) VALUES ($1, $2, $3, $4, $5, $6)",
+            """
+            INSERT INTO defect_reports (
+                serial,
+                new_serial,
+                action,
+                comment,
+                report_date,
+                report_time,
+                location,
+                media_links,
+                employee_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            """,
             serial,
+            new_serial,
+            action,
+            comment,
             report_date,
             report_time,
             location,
             media_links,
             employee_id,
         )
-        logger.info(f"Отчёт о дефекте для серийника {serial} добавлен")
+        logger.info(
+            "Отчёт о дефекте для серийника %s добавлен (действие: %s, новый серийник: %s)",
+            serial,
+            action,
+            new_serial,
+        )
 
 
 async def get_defect_reports(serial=None, serial_from=None, serial_to=None):

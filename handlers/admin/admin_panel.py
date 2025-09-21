@@ -35,6 +35,7 @@ from database.db import (
     update_exam_record,
     get_exam_records,
     add_defect_report,
+    get_appeal,
     set_code_word,
     get_training_centers,
     update_training_center,
@@ -88,7 +89,11 @@ class AdminResponse(StatesGroup):
     edit_channel = State()
     add_employee = State()
     defect_report_serial = State()
+    defect_report_action = State()
+    defect_report_new_serial = State()
+    defect_report_confirm_serial = State()
     defect_report_location = State()
+    defect_report_comment = State()
     defect_report_media = State()
     defect_status_serial = State()
     exam_fio = State()
@@ -110,6 +115,12 @@ class AdminResponse(StatesGroup):
 
 
 COLON_VARIANTS = (":", "\uf03a", "\uff1a", "\ufe55", "\ufe13", "\u2236")
+
+
+DEFECT_ACTION_LABELS = {
+    "repair": "Ремонт",
+    "replacement": "Замена",
+}
 
 
 def _replace_colon_variants(value: str, replacement: str) -> str:
@@ -166,6 +177,12 @@ def _ensure_unique_media_path(directory: Path, base_name: str, suffix: str) -> P
         candidate = directory / f"{base_name}_{counter}{suffix}"
         counter += 1
     return candidate
+
+
+def _single_back_keyboard(callback_data: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=callback_data)]]
+    )
 
 
 async def _resolve_training_center_name(
@@ -2092,7 +2109,12 @@ async def process_export_defect_reports(message: Message, state: FSMContext, **d
         ]
         data.append(
             {
-                "Serial": report["serial"],
+                "Старый серийный номер": report["serial"],
+                "Новый серийный номер": report.get("new_serial") or "Не указан",
+                "Действие": "Замена"
+                if report.get("action") == "replacement"
+                else "Ремонт",
+                "Комментарий": report.get("comment") or "Не указан",
                 "Дата": report["report_date"],
                 "Время": report["report_time"],
                 "Место": report["location"],
@@ -2136,56 +2158,279 @@ async def process_defect_serial(message: Message, state: FSMContext):
             f"Пустой серийный номер для отчёта о дефекте от @{message.from_user.username}"
         )
         return
-    await state.update_data(serial=serial)
+    await state.update_data(
+        serial=serial,
+        media_links=[],
+        action=None,
+        new_serial=None,
+        comment=None,
+        return_callback="defect_menu",
+    )
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
+            [
+                InlineKeyboardButton(
+                    text="Ремонт", callback_data="choose_defect_action_repair"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Замена",
+                    callback_data="choose_defect_action_replacement",
+                )
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")],
         ]
     )
-    await message.answer("Введите место:", reply_markup=keyboard)
-    await state.set_state(AdminResponse.defect_report_location)
+    await message.answer(
+        "Выберите действие: ремонт или замена.",
+        reply_markup=keyboard,
+    )
+    await state.set_state(AdminResponse.defect_report_action)
     logger.debug(
-        f"Серийный номер {serial} для отчёта о дефекте принят от @{message.from_user.username}"
+        "Выбор действия для отчёта о дефекте по серийному номеру %s запрошен у @%s",
+        serial,
+        message.from_user.username,
+    )
+
+
+@router.callback_query(
+    F.data.in_({"choose_defect_action_repair", "choose_defect_action_replacement"}),
+    StateFilter(AdminResponse.defect_report_action),
+)
+async def choose_defect_action(callback: CallbackQuery, state: FSMContext):
+    data_state = await state.get_data()
+    serial = data_state.get("serial")
+    return_callback = data_state.get("return_callback", "defect_menu")
+    if not serial:
+        await callback.answer("Не найден серийный номер", show_alert=True)
+        await state.clear()
+        return
+    action = (
+        "repair"
+        if callback.data == "choose_defect_action_repair"
+        else "replacement"
+    )
+    await state.update_data(action=action)
+    if action == "replacement":
+        await callback.message.edit_text(
+            "Введите серийный номер нового устройства:",
+            reply_markup=_single_back_keyboard(return_callback),
+        )
+        await state.set_state(AdminResponse.defect_report_new_serial)
+    else:
+        await callback.message.edit_text(
+            "Укажите место проведения работ:",
+            reply_markup=_single_back_keyboard(return_callback),
+        )
+        await state.set_state(AdminResponse.defect_report_location)
+    await callback.answer()
+
+
+@router.message(StateFilter(AdminResponse.defect_report_new_serial))
+async def process_new_serial(message: Message, state: FSMContext):
+    new_serial = (message.text or "").strip()
+    data_state = await state.get_data()
+    return_callback = data_state.get("return_callback", "defect_menu")
+    if not new_serial:
+        await message.answer(
+            "Серийный номер не может быть пустым. Укажите новый серийный номер:",
+            reply_markup=_single_back_keyboard(return_callback),
+        )
+        return
+    await state.update_data(new_serial_candidate=new_serial)
+    await message.answer(
+        "Повторите серийный номер нового устройства для подтверждения:",
+        reply_markup=_single_back_keyboard(return_callback),
+    )
+    await state.set_state(AdminResponse.defect_report_confirm_serial)
+
+
+@router.message(StateFilter(AdminResponse.defect_report_confirm_serial))
+async def confirm_new_serial(message: Message, state: FSMContext):
+    confirmation = (message.text or "").strip()
+    data_state = await state.get_data()
+    expected = data_state.get("new_serial_candidate")
+    return_callback = data_state.get("return_callback", "defect_menu")
+    if not confirmation:
+        await message.answer(
+            "Серийный номер не может быть пустым. Повторите ввод:",
+            reply_markup=_single_back_keyboard(return_callback),
+        )
+        return
+    if confirmation != expected:
+        await message.answer(
+            "Введённые серийные номера не совпадают. Попробуйте снова.",
+            reply_markup=_single_back_keyboard(return_callback),
+        )
+        await state.set_state(AdminResponse.defect_report_new_serial)
+        return
+    await state.update_data(new_serial=confirmation, new_serial_candidate=None)
+    await message.answer(
+        "Укажите место проведения работ:",
+        reply_markup=_single_back_keyboard(return_callback),
+    )
+    await state.set_state(AdminResponse.defect_report_location)
+
+
+async def _start_defect_report_from_appeal(
+    callback: CallbackQuery, state: FSMContext, db_pool, action: str
+) -> None:
+    appeal_id = int(callback.data.split("_")[-1])
+    appeal = await get_appeal(appeal_id)
+    if not appeal:
+        await callback.message.edit_text(
+            "Заявка не найдена.",
+            reply_markup=_single_back_keyboard("main_menu"),
+        )
+        logger.warning(
+            "Заявка №%s не найдена при попытке %s от @%s",
+            appeal_id,
+            action,
+            callback.from_user.username,
+        )
+        await state.clear()
+        return
+    assigned_admin = appeal.get("admin_id")
+    if (
+        callback.from_user.id not in MAIN_ADMIN_IDS
+        and assigned_admin is not None
+        and assigned_admin != callback.from_user.id
+    ):
+        await callback.message.edit_text(
+            "Вы не являетесь исполнителем этой заявки.",
+            reply_markup=_single_back_keyboard(f"view_appeal_{appeal_id}"),
+        )
+        await callback.answer()
+        return
+    async with db_pool.acquire() as conn:
+        admin_exists = await conn.fetchval(
+            "SELECT 1 FROM admins WHERE admin_id = $1", callback.from_user.id
+        )
+        if not admin_exists:
+            if callback.from_user.id in MAIN_ADMIN_IDS:
+                await add_admin(callback.from_user.id, callback.from_user.username or "unknown")
+            else:
+                await callback.message.edit_text(
+                    "Вы не зарегистрированы как сотрудник.",
+                    reply_markup=_single_back_keyboard("main_menu"),
+                )
+                await callback.answer()
+                return
+    return_callback = f"view_appeal_{appeal_id}"
+    await state.clear()
+    await state.update_data(
+        serial=appeal["serial"],
+        media_links=[],
+        action=action,
+        new_serial=None,
+        comment=None,
+        return_callback=return_callback,
+        appeal_id=appeal_id,
+        employee_id=callback.from_user.id,
+    )
+    if action == "replacement":
+        prompt_text = "Введите серийный номер нового устройства:"
+        next_state = AdminResponse.defect_report_new_serial
+    else:
+        prompt_text = "Укажите место проведения работ:"
+        next_state = AdminResponse.defect_report_location
+    await state.set_state(next_state)
+    await callback.message.edit_text(
+        prompt_text,
+        reply_markup=_single_back_keyboard(return_callback),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("repair_appeal_"))
+async def repair_appeal(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=_single_back_keyboard("main_menu"),
+        )
+        return
+    await _start_defect_report_from_appeal(
+        callback, state, db_pool, action="repair"
+    )
+
+
+@router.callback_query(F.data.startswith("replace_appeal_"))
+async def replace_appeal(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=_single_back_keyboard("main_menu"),
+        )
+        return
+    await _start_defect_report_from_appeal(
+        callback, state, db_pool, action="replacement"
     )
 
 
 @router.message(StateFilter(AdminResponse.defect_report_location))
 async def process_defect_location(message: Message, state: FSMContext):
-    location = message.text.strip()
+    location = (message.text or "").strip()
+    data_state = await state.get_data()
+    return_callback = data_state.get("return_callback", "defect_menu")
     if not location:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-            ]
-        )
         await message.answer(
-            "Место не может быть пустым. Попробуйте снова:", reply_markup=keyboard
+            "Место не может быть пустым. Укажите место проведения работ:",
+            reply_markup=_single_back_keyboard(return_callback),
         )
         logger.warning(
-            f"Пустое место для отчёта о дефекте от @{message.from_user.username}"
+            "Пустое место для отчёта о дефекте от @%s",
+            message.from_user.username,
         )
         return
     await state.update_data(location=location)
+    await message.answer(
+        "Добавьте комментарий к отчёту:",
+        reply_markup=_single_back_keyboard(return_callback),
+    )
+    await state.set_state(AdminResponse.defect_report_comment)
+    logger.debug(
+        "Место %s для отчёта о дефекте принято от @%s",
+        location,
+        message.from_user.username,
+    )
+
+
+@router.message(StateFilter(AdminResponse.defect_report_comment))
+async def process_defect_comment(message: Message, state: FSMContext):
+    comment = (message.text or "").strip()
+    data_state = await state.get_data()
+    return_callback = data_state.get("return_callback", "defect_menu")
+    if not comment:
+        await message.answer(
+            "Комментарий не может быть пустым. Добавьте комментарий:",
+            reply_markup=_single_back_keyboard(return_callback),
+        )
+        return
+    await state.update_data(comment=comment)
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Готово", callback_data="done_defect_media")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=return_callback)],
         ]
     )
     await message.answer(
-        "Прикрепите фото/видео (до 10, или нажмите 'Готово'):", reply_markup=keyboard
+        "Прикрепите фото/видео (до 10) или нажмите 'Готово':",
+        reply_markup=keyboard,
     )
     await state.set_state(AdminResponse.defect_report_media)
-    await state.update_data(media_links=[])
-    logger.debug(
-        f"Место {location} для отчёта о дефекте принято от @{message.from_user.username}"
-    )
 
 
 @router.message(StateFilter(AdminResponse.defect_report_media))
 async def process_defect_media(message: Message, state: FSMContext):
     data_state = await state.get_data()
     media_links = data_state.get("media_links", [])
+    return_callback = data_state.get("return_callback", "defect_menu")
     if len(media_links) >= 10:
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -2194,7 +2439,7 @@ async def process_defect_media(message: Message, state: FSMContext):
                         text="Готово", callback_data="done_defect_media"
                     )
                 ],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data=return_callback)],
             ]
         )
         await message.answer(
@@ -2208,7 +2453,7 @@ async def process_defect_media(message: Message, state: FSMContext):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Готово", callback_data="done_defect_media")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=return_callback)],
         ]
     )
     is_valid, media = validate_media(message)
@@ -2257,9 +2502,16 @@ async def process_defect_status_serial(message: Message, state: FSMContext):
     await state.update_data(serial=serial)
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Брак", callback_data="set_defect_brak")],
-            [InlineKeyboardButton(text="Возврат", callback_data="set_defect_vozvrat")],
-            [InlineKeyboardButton(text="Замена", callback_data="set_defect_zamena")],
+            [
+                InlineKeyboardButton(
+                    text="Ремонт", callback_data="set_defect_repair"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Замена", callback_data="set_defect_replacement"
+                )
+            ],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")],
         ]
     )
@@ -2285,21 +2537,31 @@ async def set_defect_status(callback: CallbackQuery, state: FSMContext, **data):
         return
     data_state = await state.get_data()
     serial = data_state.get("serial")
-    status = callback.data.split("_")[-1]  # brak, vozvrat, zamena
+    status_key = callback.data.split("_")[-1]
+    if status_key not in {"repair", "replacement"}:
+        await callback.answer("Неизвестный статус", show_alert=True)
+        return
     async with db_pool.acquire() as conn:
         await conn.execute(
-            "UPDATE serials SET status = $1 WHERE serial = $2", status, serial
+            "UPDATE serials SET status = $1 WHERE serial = $2",
+            status_key,
+            serial,
         )
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
         ]
     )
+    status_label = DEFECT_ACTION_LABELS.get(status_key, status_key)
     await callback.message.edit_text(
-        f"Статус устройства {serial} изменён на '{status}'.", reply_markup=keyboard
+        f"Статус устройства {serial} изменён на '{status_label}'.",
+        reply_markup=keyboard,
     )
     logger.info(
-        f"Статус устройства {serial} изменён на '{status}' пользователем @{callback.from_user.username}"
+        "Статус устройства %s изменён на '%s' пользователем @%s",
+        serial,
+        status_label,
+        callback.from_user.username,
     )
     await state.clear()
 
@@ -2582,9 +2844,16 @@ async def process_defect_status_serial(message: Message, state: FSMContext):
     await state.update_data(serial=serial)
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Брак", callback_data="set_defect_brak")],
-            [InlineKeyboardButton(text="Возврат", callback_data="set_defect_vozvrat")],
-            [InlineKeyboardButton(text="Замена", callback_data="set_defect_zamena")],
+            [
+                InlineKeyboardButton(
+                    text="Ремонт", callback_data="set_defect_repair"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Замена", callback_data="set_defect_replacement"
+                )
+            ],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")],
         ]
     )
@@ -2610,10 +2879,15 @@ async def set_defect_status(callback: CallbackQuery, state: FSMContext, **data):
         return
     data_state = await state.get_data()
     serial = data_state.get("serial")
-    status = callback.data.split("_")[-1]  # brak, vozvrat, zamena
+    status_key = callback.data.split("_")[-1]
+    if status_key not in {"repair", "replacement"}:
+        await callback.answer("Неизвестный статус", show_alert=True)
+        return
     async with db_pool.acquire() as conn:
         await conn.execute(
-            "UPDATE serials SET status = $1 WHERE serial = $2", status, serial
+            "UPDATE serials SET status = $1 WHERE serial = $2",
+            status_key,
+            serial,
         )
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -2621,10 +2895,11 @@ async def set_defect_status(callback: CallbackQuery, state: FSMContext, **data):
         ]
     )
     await callback.message.edit_text(
-        f"Статус устройства {serial} изменён на '{status}'.", reply_markup=keyboard
+        f"Статус устройства {serial} изменён на '{DEFECT_ACTION_LABELS.get(status_key, status_key)}'.",
+        reply_markup=keyboard,
     )
     logger.info(
-        f"Статус устройства {serial} изменён на '{status}' пользователем @{callback.from_user.username}"
+        f"Статус устройства {serial} изменён на '{status_key}' пользователем @{callback.from_user.username}"
     )
     await state.clear()
 
@@ -2682,7 +2957,7 @@ async def defect_menu_prompt(callback: CallbackQuery, **data):
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")],
         ]
     )
-    await callback.message.edit_text("Меню брак/возврат/замена:", reply_markup=keyboard)
+    await callback.message.edit_text("Меню ремонт/замена:", reply_markup=keyboard)
     logger.debug(f"Открыто меню брака от @{callback.from_user.username}")
 
 
@@ -2791,16 +3066,36 @@ async def done_defect_media(callback: CallbackQuery, state: FSMContext, **data):
         logger.error("db_pool отсутствует в data")
         await callback.message.edit_text(
             "Ошибка сервера. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-                ]
-            ),
+            reply_markup=_single_back_keyboard("defect_menu"),
         )
         return
     data_state = await state.get_data()
     serial = data_state.get("serial")
-    location = data_state.get("location")  # Получаем location из состояния
+    location = data_state.get("location")
+    action = data_state.get("action")
+    comment = data_state.get("comment")
+    new_serial = data_state.get("new_serial")
+    return_callback = data_state.get("return_callback", "defect_menu")
+    if (
+        not serial
+        or not location
+        or not action
+        or not comment
+        or (action == "replacement" and not new_serial)
+    ):
+        await callback.message.edit_text(
+            "Не удалось сохранить отчёт: заполните все обязательные поля.",
+            reply_markup=_single_back_keyboard(return_callback),
+        )
+        logger.error(
+            "Недостаточно данных для отчёта о дефекте (serial=%s, location=%s, action=%s, comment=%s)",
+            serial,
+            location,
+            action,
+            comment,
+        )
+        await state.clear()
+        return
     report_date = datetime.now().strftime("%Y-%m-%d")
     report_time = datetime.now().strftime("%H:%M")
     media_links = data_state.get("media_links", [])
@@ -2839,31 +3134,27 @@ async def done_defect_media(callback: CallbackQuery, state: FSMContext, **data):
                 location,
                 json.dumps(media_links),
                 employee_id,
+                action,
+                new_serial=new_serial,
+                comment=comment,
             )
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-            ]
-        )
+        keyboard = _single_back_keyboard(return_callback)
         await callback.message.edit_text(
             "Отчёт о дефекте сохранён.", reply_markup=keyboard
         )
         logger.info(
             f"Отчёт о дефекте для серийника {serial} сохранён пользователем @{callback.from_user.username}"
         )
+        await state.clear()
     except Exception as e:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-            ]
-        )
+        keyboard = _single_back_keyboard(return_callback)
         await callback.message.edit_text(
             f"Ошибка сохранения отчёта: {str(e)}", reply_markup=keyboard
         )
         logger.error(
             f"Ошибка сохранения отчёта о дефекте для серийника {serial}: {str(e)}"
         )
-    await state.clear()
+        await state.clear()
 
 
 @router.callback_query(F.data.startswith("employee_appeals_page_"))

@@ -929,7 +929,7 @@ async def navigate_open_appeals_page(
 
 
 @router.callback_query(F.data.startswith("view_appeal_"))
-async def view_appeal(callback: CallbackQuery, **data):
+async def view_appeal(callback: CallbackQuery, state: FSMContext, **data):
     appeal_id = int(callback.data.split("_")[-1])
     appeal = await get_appeal(appeal_id)
     if not appeal:
@@ -976,8 +976,14 @@ async def view_appeal(callback: CallbackQuery, **data):
         f"Ответ: {appeal['response'] or 'Нет ответа'}{new_serial_text}"
     )
     media_count = len(media_files)
+    await state.clear()
+    assigned_admin = appeal.get("admin_id")
+    can_service = (
+        callback.from_user.id in MAIN_ADMIN_IDS
+        or (assigned_admin is not None and assigned_admin == callback.from_user.id)
+    )
     keyboard = (
-        get_appeal_actions_menu(appeal_id, appeal["status"])
+        get_appeal_actions_menu(appeal_id, appeal["status"], can_service=can_service)
         if appeal["status"]
         in [
             "new",

@@ -245,7 +245,10 @@ async def process_report_serial(message: Message, state: FSMContext, **data):
         ]
         data.append(
             {
-                "Серийный номер": report["serial"],
+                "Старый серийный номер": report["serial"],
+                "Новый серийный номер": report.get("new_serial") or "Не указан",
+                "Действие": "Замена" if report.get("action") == "replacement" else "Ремонт",
+                "Комментарий": report.get("comment") or "Не указан",
                 "Дата": report["report_date"],
                 "Время": report["report_time"],
                 "Место": report["location"],
