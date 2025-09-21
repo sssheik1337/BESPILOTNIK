@@ -1478,7 +1478,7 @@ async def add_employee_prompt(callback: CallbackQuery, state: FSMContext):
     )
     await callback.message.edit_text(
         "Введите Telegram ID и username сотрудника (формат: ID @username). Если username отсутствует, укажите 'Нет'. "
-        "Узнать свой Telegram ID можно через @userinfobot, отправив ему команду /start.",
+        "Узнать свой Telegram ID можно, отправив команду /getme этому боту.",
         reply_markup=keyboard,
     )
     await state.set_state(AdminResponse.add_employee)

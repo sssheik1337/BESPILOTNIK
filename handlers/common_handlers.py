@@ -8,7 +8,7 @@ from aiogram.types import (
     InputMediaPhoto,
     FSInputFile,
 )
-from aiogram.filters import CommandStart, StateFilter
+from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from pathlib import Path
@@ -155,6 +155,21 @@ async def confirm_auto_delete(callback: CallbackQuery, state: FSMContext):
         f"Пользователь @{username} (ID: {user_id}) подтвердил автоудаление и запрошен выбор сценария"
     )
     await callback.answer()
+
+
+@router.message(Command("getme"))
+async def getme_command(message: Message):
+    user = message.from_user
+    username = user.username or "не указан"
+    logger.debug(
+        "Команда /getme от пользователя @%s (ID: %s)", user.username or "неизвестно", user.id
+    )
+    await message.answer(
+        "Ваш Telegram ID: {id}\nUsername: {username}".format(
+            id=user.id,
+            username=f"@{username}" if user.username else username,
+        )
+    )
 
 
 @router.callback_query(F.data == "request_support")
