@@ -185,7 +185,6 @@ async def request_support(callback: CallbackQuery, state: FSMContext):
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
-                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
             ]
         ),
     )
@@ -204,7 +203,6 @@ async def setup_manual(callback: CallbackQuery, state: FSMContext):
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
-                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
             ]
         ),
     )

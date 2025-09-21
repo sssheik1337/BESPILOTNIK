@@ -19,6 +19,7 @@ def get_user_menu():
                     text="📋 Мои обращения", callback_data="my_appeals_user"
                 )
             ],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
         ]
     )
     logger.debug("Создана клавиатура для пользовательского меню")
@@ -46,11 +47,6 @@ def get_manuals_menu():
             [
                 InlineKeyboardButton(
                     text="📘 Руководство по дрону", callback_data="manual_drone"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="↩️ К выбору действий", callback_data="select_scenario"
                 )
             ],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
