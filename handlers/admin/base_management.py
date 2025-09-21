@@ -30,9 +30,21 @@ class BaseManagement(StatesGroup):
 
 @router.callback_query(F.data == "manage_base")
 async def manage_base(callback: CallbackQuery):
-    await callback.message.edit_text(
-        "Управление базой:", reply_markup=get_base_management_menu()
-    )
+    if callback.message.text:
+        await callback.message.edit_text(
+            "Управление базой:", reply_markup=get_base_management_menu()
+        )
+    else:
+        try:
+            await callback.message.delete()
+        except Exception:
+            logger.debug(
+                "Не удалось удалить сообщение без текста при возврате в управление базой",
+                exc_info=True,
+            )
+        await callback.message.answer(
+            "Управление базой:", reply_markup=get_base_management_menu()
+        )
     logger.info(f"Пользователь @{callback.from_user.username} открыл управление базой")
 
 
