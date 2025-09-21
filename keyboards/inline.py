@@ -19,17 +19,6 @@ def get_user_menu():
                     text="📋 Мои обращения", callback_data="my_appeals_user"
                 )
             ],
-            [
-                InlineKeyboardButton(
-                    text="🚀 Подготовка к запуску", callback_data="prepare_launch"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🎮 Настройка пульта", callback_data="setup_remote"
-                )
-            ],
-            [InlineKeyboardButton(text="🛠 Настройка НСУ", callback_data="setup_nsu")],
         ]
     )
     logger.debug("Создана клавиатура для пользовательского меню")
@@ -41,17 +30,30 @@ def get_manuals_menu():
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Настройка пульта", callback_data="manual_remote"
+                    text="🎮 Настройка пульта", callback_data="manual_remote"
                 )
             ],
-            [InlineKeyboardButton(text="Прошивка ЕРЛС", callback_data="manual_erlc")],
-            [InlineKeyboardButton(text="Настройка НСУ", callback_data="manual_nsu")],
             [
                 InlineKeyboardButton(
-                    text="Руководство по дрону", callback_data="manual_drone"
+                    text="🧰 Прошивка ЕРЛС", callback_data="manual_erlc"
                 )
             ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")],
+            [
+                InlineKeyboardButton(
+                    text="🛰 Настройка НСУ", callback_data="manual_nsu"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📘 Руководство по дрону", callback_data="manual_drone"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="↩️ К выбору действий", callback_data="select_scenario"
+                )
+            ],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
         ]
     )
     logger.debug("Создана клавиатура меню руководств")

@@ -41,6 +41,28 @@ async def clear_serial_state(user_id, state: FSMContext, delay=12 * 3600):
         logger.info(f"Состояние серийного номера очищено для пользователя ID {user_id}")
 
 
+def _scenario_selection_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🛟 Запрос техподдержки", callback_data="request_support"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🎓 Запись на обучение", callback_data="enroll_training"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📘 Руководство по настройке", callback_data="setup_manual"
+                )
+            ],
+        ]
+    )
+
+
 @router.message(CommandStart())
 async def start_command(message: Message, state: FSMContext, bot: Bot, **data):
     user_id = message.from_user.id
@@ -103,7 +125,7 @@ async def start_command(message: Message, state: FSMContext, bot: Bot, **data):
                     inline_keyboard=[
                         [
                             InlineKeyboardButton(
-                                text="Я ВКЛЮЧИЛ АВТОУДАЛЕНИЕ",
+                                text="✅ Я включил автоудаление",
                                 callback_data="confirm_auto_delete",
                             )
                         ]
@@ -130,25 +152,7 @@ async def confirm_auto_delete(callback: CallbackQuery, state: FSMContext):
     await callback.message.delete()
     await callback.message.answer(
         "Выберите действие:",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="Запрос тех.поддержки", callback_data="request_support"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="Запись на обучение", callback_data="enroll_training"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="Руководство по настройке", callback_data="setup_manual"
-                    )
-                ],
-            ]
-        ),
+        reply_markup=_scenario_selection_keyboard(),
     )
     await state.set_state(None)
     logger.debug(
@@ -180,7 +184,8 @@ async def request_support(callback: CallbackQuery, state: FSMContext):
         "Введите серийный номер:",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
             ]
         ),
     )
@@ -198,7 +203,8 @@ async def setup_manual(callback: CallbackQuery, state: FSMContext):
         "Введите серийный номер:",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
             ]
         ),
     )
@@ -213,26 +219,7 @@ async def setup_manual(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "select_scenario")
 async def select_scenario(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
-        "Выберите действие:",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="Запрос тех.поддержки", callback_data="request_support"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="Запись на обучение", callback_data="enroll_training"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="Руководство по настройке", callback_data="setup_manual"
-                    )
-                ],
-            ]
-        ),
+        "Выберите действие:", reply_markup=_scenario_selection_keyboard()
     )
     await state.set_state(None)
     logger.debug(
@@ -351,6 +338,19 @@ async def return_to_main_menu(
     else:
         data_state = await state.get_data()
         serial = data_state.get("serial")
+        scenario = data_state.get("scenario")
+        if scenario:
+            await state.set_state(None)
+            await bot.send_message(
+                chat_id=callback.message.chat.id,
+                text="Выберите действие:",
+                reply_markup=_scenario_selection_keyboard(),
+            )
+            logger.debug(
+                f"Пользователь @{username} (ID: {user_id}) возвращён в главное меню выбора"
+            )
+            await callback.answer()
+            return
         if serial:
             await state.set_state(UserState.menu)
             await bot.send_message(
