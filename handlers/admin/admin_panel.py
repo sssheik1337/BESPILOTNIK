@@ -52,6 +52,7 @@ from config import (
     LOCAL_BOT_API_CACHE_DIR,
     EXAM_VIDEOS_DIR,
     EXAM_PHOTOS_DIR,
+    DEFECT_MEDIA_DIR,
 )
 from datetime import datetime
 import logging
@@ -62,6 +63,7 @@ import json
 from utils.validators import validate_media
 from utils.statuses import APPEAL_STATUSES
 from utils.video import compress_video
+from utils.storage import build_public_url
 import aiohttp
 from aiohttp import ClientError
 import shutil
@@ -176,6 +178,20 @@ def _ensure_unique_media_path(directory: Path, base_name: str, suffix: str) -> P
         candidate = directory / f"{base_name}_{counter}{suffix}"
         counter += 1
     return candidate
+
+
+def _defect_media_directory(media_type: str) -> Path:
+    subfolder = "videos" if media_type in {"video", "video_note"} else "photos"
+    return Path(DEFECT_MEDIA_DIR) / subfolder
+
+
+def _defect_media_basename(serial: str, action: str) -> str:
+    serial_component = _sanitize_filename_component(serial or "defect")
+    action_component = _sanitize_filename_component(action or "action")
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    return "_".join(
+        part for part in [serial_component, action_component, timestamp] if part
+    )
 
 
 def _single_back_keyboard(callback_data: str) -> InlineKeyboardMarkup:
@@ -918,7 +934,9 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
         final_path.parent.mkdir(parents=True, exist_ok=True)
         compressed_file.replace(final_path)
 
-        await state.update_data(video_link=final_path.name)
+        public_url = build_public_url(final_path)
+
+        await state.update_data(video_link=public_url)
         await message.answer(
             "Видео принято. Загрузите фото (до 5 штук) или завершите.",
             reply_markup=InlineKeyboardMarkup(
@@ -997,7 +1015,7 @@ async def process_exam_photo(message: Message, state: FSMContext, **data):
             )
             final_path.parent.mkdir(parents=True, exist_ok=True)
             source_path.replace(final_path)
-            photo_links.append(final_path.name)
+            photo_links.append(build_public_url(final_path))
             await state.update_data(photo_links=photo_links)
             await message.answer(
                 f"Фото добавлено ({len(photo_links)}/10). Прикрепите ещё или нажмите 'Готово':",
@@ -1009,6 +1027,20 @@ async def process_exam_photo(message: Message, state: FSMContext, **data):
             )
             logger.debug(
                 f"Фото добавлено для экзамена от @{message.from_user.username} (ID: {message.from_user.id}), сохранено как {final_path.name}"
+            )
+        except LocalBotAPIConfigurationError as config_error:
+            logger.error(
+                "Ошибка конфигурации локального Bot API при сохранении фото экзамена: %s",
+                config_error,
+            )
+            await message.answer(
+                "Локальный Bot API работает в режиме --local, но путь к данным не настроен. "
+                "Укажите LOCAL_BOT_API_DATA_DIR и примонтируйте каталог перед повторной загрузкой.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="Готово", callback_data="finish_exam")]
+                    ]
+                ),
             )
         except Exception as exc:
             logger.error(
@@ -2098,14 +2130,22 @@ async def process_export_defect_reports(message: Message, state: FSMContext, **d
     data = []
     for report in reports:
         media_links = json.loads(report["media_links"] or "[]")
+
+        def _link(media: dict) -> Optional[str]:
+            if not isinstance(media, dict):
+                return str(media)
+            return media.get("url") or media.get("file_id")
+
         photo_links = [
-            media["file_id"] for media in media_links if media["type"] == "photo"
+            _link(media) for media in media_links if media.get("type") == "photo"
         ]
         video_links = [
-            media["file_id"]
+            _link(media)
             for media in media_links
-            if media["type"] in ["video", "video_note"]
+            if media.get("type") in ["video", "video_note"]
         ]
+        photo_links = [link for link in photo_links if link]
+        video_links = [link for link in video_links if link]
         data.append(
             {
                 "Старый серийный номер": report["serial"],
@@ -2481,21 +2521,65 @@ async def process_defect_media(message: Message, state: FSMContext):
         ]
     )
     is_valid, media = validate_media(message)
+    download_result = None
     if is_valid:
-        file_id = media[0]["file_id"]
-        file = await message.bot.get_file(file_id)
-        file_path = file.file_path
-        full_link = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-        media[0]["file_id"] = full_link
-        media_links.append(media[0])
-        await state.update_data(media_links=media_links)
-        await message.answer(
-            f"Медиа добавлено ({len(media_links)}/10). Приложите ещё или нажмите 'Готово':",
-            reply_markup=keyboard,
-        )
-        logger.debug(
-            f"Медиа ({media[0]['type']}) добавлено для отчёта о дефекте от @{message.from_user.username}: {full_link}"
-        )
+        media_item = media[0]
+        media_type = media_item["type"]
+        try:
+            cache_dir = Path(LOCAL_BOT_API_CACHE_DIR) / "defects"
+            download_result = await download_from_local_api(
+                file_id=media_item["file_id"],
+                token=TOKEN,
+                base_dir=str(cache_dir),
+            )
+            source_path = Path(download_result.local_path)
+            suffix = source_path.suffix
+            if not suffix:
+                suffix = ".mp4" if media_type != "photo" else ".jpg"
+            serial = data_state.get("serial", "")
+            action = data_state.get("action", "")
+            base_name = _defect_media_basename(serial, action)
+            indexed_base = f"{base_name}_{len(media_links) + 1}"
+            target_dir = _defect_media_directory(media_type)
+            final_path = _ensure_unique_media_path(target_dir, indexed_base, suffix)
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.replace(final_path)
+            public_url = build_public_url(final_path)
+            media_links.append({"type": media_type, "url": public_url})
+            await state.update_data(media_links=media_links)
+            await message.answer(
+                f"Медиа добавлено ({len(media_links)}/10). Приложите ещё или нажмите 'Готово':",
+                reply_markup=keyboard,
+            )
+            logger.debug(
+                "Медиа (%s) добавлено для отчёта о дефекте от @%s: %s",
+                media_type,
+                message.from_user.username,
+                public_url,
+            )
+        except LocalBotAPIConfigurationError as config_error:
+            logger.error(
+                "Ошибка конфигурации локального Bot API при сохранении медиа для отчёта о дефекте: %s",
+                config_error,
+            )
+            await message.answer(
+                "Локальный Bot API работает в режиме --local, но путь к данным не настроен. "
+                "Укажите LOCAL_BOT_API_DATA_DIR и примонтируйте каталог перед повторной загрузкой.",
+                reply_markup=keyboard,
+            )
+        except Exception as exc:
+            logger.error(
+                "Ошибка сохранения медиа для отчёта о дефекте от @%s: %s",
+                message.from_user.username,
+                exc,
+            )
+            await message.answer(
+                "Не удалось сохранить медиа. Попробуйте снова или завершите без вложений.",
+                reply_markup=keyboard,
+            )
+        finally:
+            if download_result:
+                await _cleanup_source_file(download_result.source_path)
     else:
         await message.answer(
             "Неподдерживаемый формат. Приложите фото (png/jpeg) или видео (mp4).",

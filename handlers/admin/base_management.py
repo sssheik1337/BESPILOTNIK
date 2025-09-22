@@ -16,6 +16,7 @@ import logging
 from io import BytesIO
 import pandas as pd
 import json
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -235,14 +236,22 @@ async def process_report_serial(message: Message, state: FSMContext, **data):
     data = []
     for report in reports:
         media_links = json.loads(report["media_links"] or "[]")
+
+        def _link(media: dict) -> Optional[str]:
+            if not isinstance(media, dict):
+                return str(media)
+            return media.get("url") or media.get("file_id")
+
         photo_links = [
-            media["file_id"] for media in media_links if media["type"] == "photo"
+            _link(media) for media in media_links if media.get("type") == "photo"
         ]
         video_links = [
-            media["file_id"]
+            _link(media)
             for media in media_links
-            if media["type"] in ["video", "video_note"]
+            if media.get("type") in ["video", "video_note"]
         ]
+        photo_links = [link for link in photo_links if link]
+        video_links = [link for link in video_links if link]
         data.append(
             {
                 "Старый серийный номер": report["serial"],

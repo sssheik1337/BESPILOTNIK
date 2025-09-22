@@ -11,6 +11,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 from config import TOKEN, API_BASE_URL, WEBHOOK_URL, MAIN_ADMIN_IDS
+from utils.storage import public_root
 from handlers import user_handlers, common_handlers, user_exam
 from handlers.admin import (
     serial_history,
@@ -300,6 +301,7 @@ def main():
     app["bot"] = bot
     app["dp"] = dp
     app.router.add_get("/", handle_root)
+    app.router.add_static("/files", path=str(public_root()), show_index=False)
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_requests_handler.register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
