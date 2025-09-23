@@ -108,7 +108,7 @@ async def compress_video(
     original_size = source_path.stat().st_size
     if original_size <= target_bytes:
         logger.debug(
-            "Файл %s уже меньше или равен целевому размеру (%.2f МБ ≤ %s МБ), "
+            "Файл %s уже меньше или равен целевому размеру (%.2f МБ <= %s МБ), "
             "сжатие не требуется",
             input_file,
             original_size / (1024 * 1024),
