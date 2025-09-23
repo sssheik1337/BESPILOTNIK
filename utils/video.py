@@ -106,11 +106,13 @@ async def compress_video(
 
     target_bytes = target_size_mb * 1024 * 1024
     original_size = source_path.stat().st_size
-    if original_size <= target_bytes and source_path.suffix.lower() == ".mp4":
+    if original_size <= target_bytes:
         logger.debug(
-            "Файл %s уже меньше целевого размера (%.2f МБ), сжатие не требуется",
+            "Файл %s уже меньше или равен целевому размеру (%.2f МБ ≤ %s МБ), "
+            "сжатие не требуется",
             input_file,
             original_size / (1024 * 1024),
+            target_size_mb,
         )
         return input_file
 
