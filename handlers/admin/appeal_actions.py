@@ -14,6 +14,7 @@ from keyboards.inline import (
     get_response_menu,
     get_open_appeals_menu,
     get_my_appeals_menu,
+    get_user_appeal_actions_menu,
 )
 from utils.statuses import APPEAL_STATUSES
 from database.db import (
@@ -274,6 +275,7 @@ async def process_response(message: Message, state: FSMContext, **data):
                 datetime.now().strftime("%Y-%m-%dT%H:%M"),
                 appeal_id,
             )
+        total_media = len(existing_media)
         await message.answer(
             "Ответ отправлен.",
             reply_markup=InlineKeyboardMarkup(
@@ -305,18 +307,16 @@ async def process_response(message: Message, state: FSMContext, **data):
                         await message.bot.send_video(
                             chat_id=appeal["user_id"], video=media["file_id"]
                         )
+            user_keyboard = get_user_appeal_actions_menu(
+                appeal_id=appeal_id,
+                status=appeal["status"],
+                media_count=total_media,
+                include_view_button=True,
+            )
             await message.bot.send_message(
                 chat_id=appeal["user_id"],
                 text=f"Получен ответ по вашей заявке №{appeal_id} от администратора @{username}:\n{response}",
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="⬅️ Назад", callback_data="main_menu"
-                            )
-                        ]
-                    ]
-                ),
+                reply_markup=user_keyboard,
             )
             logger.info(
                 f"Уведомление об ответе по заявке №{appeal_id} отправлено пользователю ID {appeal['user_id']}"
@@ -515,6 +515,7 @@ async def submit_response(callback: CallbackQuery, state: FSMContext, **data):
             datetime.now().strftime("%Y-%m-%dT%H:%M"),
             appeal_id,
         )
+    total_media = len(existing_media)
     await callback.message.edit_text(
         "Ответ отправлен.",
         reply_markup=InlineKeyboardMarkup(
@@ -539,14 +540,16 @@ async def submit_response(callback: CallbackQuery, state: FSMContext, **data):
                     await callback.message.bot.send_video(
                         chat_id=appeal["user_id"], video=media["file_id"]
                     )
+        user_keyboard = get_user_appeal_actions_menu(
+            appeal_id=appeal_id,
+            status=appeal["status"],
+            media_count=total_media,
+            include_view_button=True,
+        )
         await callback.message.bot.send_message(
             chat_id=appeal["user_id"],
             text=f"Получен ответ по вашей заявке №{appeal_id} от администратора @{username}:\n{response_text}",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-                ]
-            ),
+            reply_markup=user_keyboard,
         )
         logger.info(
             f"Уведомление об ответе по заявке №{appeal_id} отправлено пользователю ID {appeal['user_id']}"
@@ -590,7 +593,8 @@ async def process_continue_dialogue(message: Message, state: FSMContext, **data)
         return
     async with db_pool.acquire() as conn:
         appeal = await conn.fetchrow(
-            "SELECT response, user_id FROM appeals WHERE appeal_id = $1", appeal_id
+            "SELECT response, user_id, status, media_files FROM appeals WHERE appeal_id = $1",
+            appeal_id,
         )
         existing_response = appeal["response"] or ""
         # Удаляем дубликаты из существующего ответа
@@ -617,9 +621,17 @@ async def process_continue_dialogue(message: Message, state: FSMContext, **data)
     )
     try:
         user_id = appeal["user_id"]
+        media_count = len(json.loads(appeal["media_files"] or "[]"))
+        user_keyboard = get_user_appeal_actions_menu(
+            appeal_id=appeal_id,
+            status=appeal["status"],
+            media_count=media_count,
+            include_view_button=True,
+        )
         await message.bot.send_message(
             chat_id=user_id,
             text=f"Вашей заявке №{appeal_id} добавлен ответ: {response_text}",
+            reply_markup=user_keyboard,
         )
         logger.info(
             f"Уведомление об ответе на заявку №{appeal_id} отправлено пользователю ID {user_id}"
@@ -917,7 +929,7 @@ async def navigate_open_appeals_page(
 
 
 @router.callback_query(F.data.startswith("view_appeal_"))
-async def view_appeal(callback: CallbackQuery, **data):
+async def view_appeal(callback: CallbackQuery, state: FSMContext, **data):
     appeal_id = int(callback.data.split("_")[-1])
     appeal = await get_appeal(appeal_id)
     if not appeal:
@@ -964,8 +976,14 @@ async def view_appeal(callback: CallbackQuery, **data):
         f"Ответ: {appeal['response'] or 'Нет ответа'}{new_serial_text}"
     )
     media_count = len(media_files)
+    await state.clear()
+    assigned_admin = appeal.get("admin_id")
+    can_service = (
+        callback.from_user.id in MAIN_ADMIN_IDS
+        or (assigned_admin is not None and assigned_admin == callback.from_user.id)
+    )
     keyboard = (
-        get_appeal_actions_menu(appeal_id, appeal["status"])
+        get_appeal_actions_menu(appeal_id, appeal["status"], can_service=can_service)
         if appeal["status"]
         in [
             "new",
@@ -1662,6 +1680,26 @@ async def await_specialist(callback: CallbackQuery, **data):
             ]
         ),
     )
+    try:
+        media_count = len(json.loads(appeal["media_files"] or "[]"))
+        user_keyboard = get_user_appeal_actions_menu(
+            appeal_id=appeal_id,
+            status="awaiting_specialist",
+            media_count=media_count,
+            include_view_button=True,
+        )
+        await callback.message.bot.send_message(
+            chat_id=appeal["user_id"],
+            text=(
+                "Вам назначен выезд специалиста для ремонта.\n"
+                "Ожидайте, с вами свяжутся."
+            ),
+            reply_markup=user_keyboard,
+        )
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
+        logger.error(
+            f"Ошибка отправки уведомления о выезде пользователю ID {appeal['user_id']} для заявки №{appeal_id}: {str(e)}"
+        )
     channels = await get_notification_channels()
     for channel in channels:
         try:

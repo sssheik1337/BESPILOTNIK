@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from pathlib import Path
 from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.types import (
     InlineKeyboardMarkup,
@@ -11,6 +12,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 from config import TOKEN, API_BASE_URL, WEBHOOK_URL, MAIN_ADMIN_IDS
+from urllib.parse import quote
+
+from utils.storage import ensure_within_public_root, public_root
 from handlers import user_handlers, common_handlers, user_exam
 from handlers.admin import (
     serial_history,
@@ -36,6 +40,7 @@ logging.basicConfig(
         ),
     ],
 )
+logging.getLogger("aiohttp.server").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 db_lock = asyncio.Lock()
@@ -91,8 +96,26 @@ class SerialCheckMiddleware(BaseMiddleware):
             logger.debug("Не удалось определить user_id, пропускаем событие")
             return await handler(update, data)
 
-        state = data["state"]
-        current_state = await state.get_state()
+        state = data.get("state")
+        if state is None:
+            logger.debug(
+                "FSM context is unavailable for событие %s, пропускаем проверку серийника",
+                type(event).__name__,
+            )
+            return await handler(update, data)
+
+        try:
+            current_state = await state.get_state()
+        except Exception as exc:  # pragma: no cover - защитная логика на случай ошибок FSM
+            logger.warning(
+                "Не удалось получить состояние FSM (%s) для пользователя %s (ID %s): %s",
+                type(event).__name__,
+                f"@{username}",
+                user_id,
+                exc,
+            )
+            return await handler(update, data)
+
         logger.debug(f"SerialCheckMiddleware: Текущее состояние FSM: {current_state}")
 
         is_fsm_state = current_state and (
@@ -101,6 +124,7 @@ class SerialCheckMiddleware(BaseMiddleware):
             or current_state.startswith("AppealForm:")
             or current_state.startswith("AdminResponse:")
             or current_state.startswith("BaseManagement:")
+            or current_state.startswith("ManualUpload:")
         )
         if is_fsm_state:
             logger.debug(
@@ -235,6 +259,28 @@ async def handle_root(request):
     return web.Response(status=404)
 
 
+async def serve_public_file(request: web.Request) -> web.StreamResponse:
+    path_fragment = request.match_info.get("path", "").strip()
+    if not path_fragment:
+        raise web.HTTPNotFound()
+
+    candidate = public_root() / Path(path_fragment)
+
+    try:
+        ensure_within_public_root(candidate)
+    except ValueError:
+        logger.warning("Попытка доступа к файлу вне публичного каталога: %s", candidate)
+        raise web.HTTPNotFound() from None
+
+    if not candidate.exists() or not candidate.is_file():
+        raise web.HTTPNotFound()
+
+    response = web.FileResponse(path=candidate)
+    safe_name = quote(candidate.name)
+    response.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{safe_name}"
+    return response
+
+
 async def on_startup(app):
     bot = app["bot"]
     dp = app["dp"]
@@ -280,6 +326,8 @@ def main():
     app["bot"] = bot
     app["dp"] = dp
     app.router.add_get("/", handle_root)
+    app.router.add_route("GET", "/files/{path:.*}", serve_public_file)
+    app.router.add_route("HEAD", "/files/{path:.*}", serve_public_file)
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_requests_handler.register(app, path="/webhook")
     setup_application(app, dp, bot=bot)

@@ -14,6 +14,7 @@ from keyboards.inline import (
     get_my_appeals_user_menu,
     get_notification_menu,
     get_channel_take_button,
+    get_user_appeal_actions_menu,
 )
 from utils.validators import validate_media
 from utils.statuses import APPEAL_STATUSES
@@ -723,37 +724,10 @@ async def view_appeal_user(callback: CallbackQuery, state: FSMContext, **data):
         f"Описание: {appeal['description']}\n"
         f"Ответ: {appeal['response'] or 'Нет ответа'}"
     )
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-    media_count = len(media_files)
-    if media_count > 0:  # Добавляем кнопку для медиа, если они есть
-        keyboard.inline_keyboard.insert(
-            0,
-            [
-                InlineKeyboardButton(
-                    text=f"📸 Медиа ({media_count})",
-                    callback_data=f"show_media_user_{appeal_id}",
-                )
-            ],
-        )
-    if appeal["status"] != "closed":
-        keyboard.inline_keyboard.append(
-            [
-                InlineKeyboardButton(
-                    text="💬 Ответить", callback_data=f"reply_user_{appeal_id}"
-                )
-            ]
-        )
-    if appeal["status"] in ["new", "in_progress"]:
-        keyboard.inline_keyboard.append(
-            [
-                InlineKeyboardButton(
-                    text="Закрыть заявку",
-                    callback_data=f"close_appeal_user_{appeal_id}",
-                )
-            ]
-        )
-    keyboard.inline_keyboard.append(
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+    keyboard = get_user_appeal_actions_menu(
+        appeal_id=appeal_id,
+        status=appeal["status"],
+        media_count=len(media_files),
     )
     await callback.message.delete()
     await callback.message.answer(response, reply_markup=keyboard)
