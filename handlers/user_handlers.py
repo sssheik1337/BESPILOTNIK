@@ -14,6 +14,7 @@ from keyboards.inline import (
     get_my_appeals_user_menu,
     get_notification_menu,
     get_channel_take_button,
+    get_user_appeal_actions_menu,
 )
 from utils.validators import validate_media
 from utils.statuses import APPEAL_STATUSES
@@ -30,7 +31,7 @@ import json
 from config import MAIN_ADMIN_IDS
 import logging
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from handlers.common_handlers import UserState  # Импорт UserState
+from handlers.common_handlers import UserState, get_start_media
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +59,6 @@ async def create_appeal_prompt(callback: CallbackQuery, state: FSMContext, bot: 
     if not serial:
         await state.set_state(UserState.waiting_for_auto_delete)
         try:
-            media = [
-                InputMediaPhoto(media=FSInputFile("/data/start1.jpg")),
-                InputMediaPhoto(media=FSInputFile("/data/start2.jpg")),
-                InputMediaPhoto(media=FSInputFile("/data/start3.jpg")),
-            ]
             await callback.message.edit_text(
                 "⚠️В целях безопасности включите автоматическое удаление сообщений через сутки в настройках Telegram.\n"
                 "Инструкция в прикреплённых изображениях.⚠️",
@@ -77,7 +73,9 @@ async def create_appeal_prompt(callback: CallbackQuery, state: FSMContext, bot: 
                     ]
                 ),
             )
-            await bot.send_media_group(chat_id=callback.message.chat.id, media=media)
+            media = get_start_media()
+            if media:
+                await bot.send_media_group(chat_id=callback.message.chat.id, media=media)
             logger.debug(
                 f"Пользователь @{username} (ID: {user_id}) перенаправлен на запрос автоудаления"
             )
@@ -723,37 +721,10 @@ async def view_appeal_user(callback: CallbackQuery, state: FSMContext, **data):
         f"Описание: {appeal['description']}\n"
         f"Ответ: {appeal['response'] or 'Нет ответа'}"
     )
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-    media_count = len(media_files)
-    if media_count > 0:  # Добавляем кнопку для медиа, если они есть
-        keyboard.inline_keyboard.insert(
-            0,
-            [
-                InlineKeyboardButton(
-                    text=f"📸 Медиа ({media_count})",
-                    callback_data=f"show_media_user_{appeal_id}",
-                )
-            ],
-        )
-    if appeal["status"] != "closed":
-        keyboard.inline_keyboard.append(
-            [
-                InlineKeyboardButton(
-                    text="💬 Ответить", callback_data=f"reply_user_{appeal_id}"
-                )
-            ]
-        )
-    if appeal["status"] in ["new", "in_progress"]:
-        keyboard.inline_keyboard.append(
-            [
-                InlineKeyboardButton(
-                    text="Закрыть заявку",
-                    callback_data=f"close_appeal_user_{appeal_id}",
-                )
-            ]
-        )
-    keyboard.inline_keyboard.append(
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+    keyboard = get_user_appeal_actions_menu(
+        appeal_id=appeal_id,
+        status=appeal["status"],
+        media_count=len(media_files),
     )
     await callback.message.delete()
     await callback.message.answer(response, reply_markup=keyboard)

@@ -16,6 +16,7 @@ import logging
 from io import BytesIO
 import pandas as pd
 import json
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +31,21 @@ class BaseManagement(StatesGroup):
 
 @router.callback_query(F.data == "manage_base")
 async def manage_base(callback: CallbackQuery):
-    await callback.message.edit_text(
-        "Управление базой:", reply_markup=get_base_management_menu()
-    )
+    if callback.message.text:
+        await callback.message.edit_text(
+            "Управление базой:", reply_markup=get_base_management_menu()
+        )
+    else:
+        try:
+            await callback.message.delete()
+        except Exception:
+            logger.debug(
+                "Не удалось удалить сообщение без текста при возврате в управление базой",
+                exc_info=True,
+            )
+        await callback.message.answer(
+            "Управление базой:", reply_markup=get_base_management_menu()
+        )
     logger.info(f"Пользователь @{callback.from_user.username} открыл управление базой")
 
 
@@ -223,17 +236,28 @@ async def process_report_serial(message: Message, state: FSMContext, **data):
     data = []
     for report in reports:
         media_links = json.loads(report["media_links"] or "[]")
+
+        def _link(media: dict) -> Optional[str]:
+            if not isinstance(media, dict):
+                return str(media)
+            return media.get("url") or media.get("file_id")
+
         photo_links = [
-            media["file_id"] for media in media_links if media["type"] == "photo"
+            _link(media) for media in media_links if media.get("type") == "photo"
         ]
         video_links = [
-            media["file_id"]
+            _link(media)
             for media in media_links
-            if media["type"] in ["video", "video_note"]
+            if media.get("type") in ["video", "video_note"]
         ]
+        photo_links = [link for link in photo_links if link]
+        video_links = [link for link in video_links if link]
         data.append(
             {
-                "Серийный номер": report["serial"],
+                "Старый серийный номер": report["serial"],
+                "Новый серийный номер": report.get("new_serial") or "Не указан",
+                "Действие": "Замена" if report.get("action") == "replacement" else "Ремонт",
+                "Комментарий": report.get("comment") or "Не указан",
                 "Дата": report["report_date"],
                 "Время": report["report_time"],
                 "Место": report["location"],

@@ -8,11 +8,14 @@ from aiogram.types import (
     InputMediaPhoto,
     FSInputFile,
 )
-from aiogram.filters import CommandStart, StateFilter
+from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from pathlib import Path
+
 from keyboards.inline import get_user_menu, get_admin_menu, get_manuals_menu
-from config import MAIN_ADMIN_IDS
+from config import MAIN_ADMIN_IDS, MANUALS_STORAGE_DIR
+from utils.storage import public_root
 import logging
 import traceback
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -31,12 +34,52 @@ class UserState(StatesGroup):
     menu = State()
 
 
+START_IMAGE_NAMES = ("start1.jpg", "start2.jpg", "start3.jpg")
+
+
+def get_start_media() -> list[InputMediaPhoto]:
+    media: list[InputMediaPhoto] = []
+    for image_name in START_IMAGE_NAMES:
+        image_path = public_root() / image_name
+        if not image_path.exists():
+            logger.warning(
+                "Стартовое изображение %s не найдено по пути %s",
+                image_name,
+                image_path,
+            )
+            continue
+        media.append(InputMediaPhoto(media=FSInputFile(image_path)))
+    return media
+
+
 async def clear_serial_state(user_id, state: FSMContext, delay=12 * 3600):
     await asyncio.sleep(delay)
     current_state = await state.get_state()
     if current_state:
         await state.clear()
         logger.info(f"Состояние серийного номера очищено для пользователя ID {user_id}")
+
+
+def _scenario_selection_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🛟 Запрос техподдержки", callback_data="request_support"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🎓 Запись на обучение", callback_data="enroll_training"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📘 Руководство по настройке", callback_data="setup_manual"
+                )
+            ],
+        ]
+    )
 
 
 @router.message(CommandStart())
@@ -88,12 +131,9 @@ async def start_command(message: Message, state: FSMContext, bot: Bot, **data):
     else:
         await state.set_state(UserState.waiting_for_auto_delete)
         try:
-            media = [
-                InputMediaPhoto(media=FSInputFile("/data/start1.jpg")),
-                InputMediaPhoto(media=FSInputFile("/data/start2.jpg")),
-                InputMediaPhoto(media=FSInputFile("/data/start3.jpg")),
-            ]
-            await bot.send_media_group(chat_id=message.chat.id, media=media)
+            media = get_start_media()
+            if media:
+                await bot.send_media_group(chat_id=message.chat.id, media=media)
             await message.answer(
                 "⚠️В целях безопасности включите автоматическое удаление сообщений через сутки в настройках Telegram.\n"
                 "Инструкция в прикреплённых изображениях.⚠️",
@@ -101,7 +141,7 @@ async def start_command(message: Message, state: FSMContext, bot: Bot, **data):
                     inline_keyboard=[
                         [
                             InlineKeyboardButton(
-                                text="Я ВКЛЮЧИЛ АВТОУДАЛЕНИЕ",
+                                text="✅ Я включил автоудаление",
                                 callback_data="confirm_auto_delete",
                             )
                         ]
@@ -128,31 +168,28 @@ async def confirm_auto_delete(callback: CallbackQuery, state: FSMContext):
     await callback.message.delete()
     await callback.message.answer(
         "Выберите действие:",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="Запрос тех.поддержки", callback_data="request_support"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="Запись на обучение", callback_data="enroll_training"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="Руководство по настройке", callback_data="setup_manual"
-                    )
-                ],
-            ]
-        ),
+        reply_markup=_scenario_selection_keyboard(),
     )
     await state.set_state(None)
     logger.debug(
         f"Пользователь @{username} (ID: {user_id}) подтвердил автоудаление и запрошен выбор сценария"
     )
     await callback.answer()
+
+
+@router.message(Command("getme"))
+async def getme_command(message: Message):
+    user = message.from_user
+    username = user.username or "не указан"
+    logger.debug(
+        "Команда /getme от пользователя @%s (ID: %s)", user.username or "неизвестно", user.id
+    )
+    await message.answer(
+        "Ваш Telegram ID: {id}\nUsername: {username}".format(
+            id=user.id,
+            username=f"@{username}" if user.username else username,
+        )
+    )
 
 
 @router.callback_query(F.data == "request_support")
@@ -163,7 +200,7 @@ async def request_support(callback: CallbackQuery, state: FSMContext):
         "Введите серийный номер:",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
             ]
         ),
     )
@@ -181,7 +218,7 @@ async def setup_manual(callback: CallbackQuery, state: FSMContext):
         "Введите серийный номер:",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
             ]
         ),
     )
@@ -196,26 +233,7 @@ async def setup_manual(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "select_scenario")
 async def select_scenario(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
-        "Выберите действие:",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="Запрос тех.поддержки", callback_data="request_support"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="Запись на обучение", callback_data="enroll_training"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="Руководство по настройке", callback_data="setup_manual"
-                    )
-                ],
-            ]
-        ),
+        "Выберите действие:", reply_markup=_scenario_selection_keyboard()
     )
     await state.set_state(None)
     logger.debug(
@@ -334,6 +352,19 @@ async def return_to_main_menu(
     else:
         data_state = await state.get_data()
         serial = data_state.get("serial")
+        scenario = data_state.get("scenario")
+        if scenario:
+            await state.set_state(None)
+            await bot.send_message(
+                chat_id=callback.message.chat.id,
+                text="Выберите действие:",
+                reply_markup=_scenario_selection_keyboard(),
+            )
+            logger.debug(
+                f"Пользователь @{username} (ID: {user_id}) возвращён в главное меню выбора"
+            )
+            await callback.answer()
+            return
         if serial:
             await state.set_state(UserState.menu)
             await bot.send_message(
@@ -347,14 +378,11 @@ async def return_to_main_menu(
         else:
             await state.set_state(UserState.waiting_for_auto_delete)
             try:
-                media = [
-                    InputMediaPhoto(media=FSInputFile("/data/start1.jpg")),
-                    InputMediaPhoto(media=FSInputFile("/data/start2.jpg")),
-                    InputMediaPhoto(media=FSInputFile("/data/start3.jpg")),
-                ]
-                await bot.send_media_group(
-                    chat_id=callback.message.chat.id, media=media
-                )
+                media = get_start_media()
+                if media:
+                    await bot.send_media_group(
+                        chat_id=callback.message.chat.id, media=media
+                    )
                 await bot.send_message(
                     chat_id=callback.message.chat.id,
                     text="⚠️В целях безопасности включите автоматическое удаление сообщений через сутки в настройках Telegram.\n"
@@ -401,15 +429,35 @@ async def send_manual(callback: CallbackQuery):
         "manual_drone": "drone",
     }
     category = mapping.get(callback.data)
-    file_id = await get_manual_file(category)
+    manual_entry = await get_manual_file(category)
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="manuals")]
         ]
     )
     await callback.message.delete()
-    if file_id:
-        await callback.message.answer_document(file_id, reply_markup=keyboard)
+    if manual_entry:
+        file_name = manual_entry.get("file_name") if isinstance(manual_entry, dict) else None
+        file_id = manual_entry.get("file_id") if isinstance(manual_entry, dict) else None
+        if file_name:
+            file_path = Path(MANUALS_STORAGE_DIR) / file_name
+            if file_path.exists():
+                await callback.message.answer_document(
+                    FSInputFile(file_path), reply_markup=keyboard
+                )
+            else:
+                logger.warning(
+                    "Файл руководства %s (%s) не найден на диске",
+                    category,
+                    file_name,
+                )
+                await callback.message.answer(
+                    "Файл отсутствует на сервере.", reply_markup=keyboard
+                )
+        elif file_id:
+            await callback.message.answer_document(file_id, reply_markup=keyboard)
+        else:
+            await callback.message.answer("Файл отсутствует.", reply_markup=keyboard)
     else:
         await callback.message.answer("Файл отсутствует.", reply_markup=keyboard)
     await callback.answer()
