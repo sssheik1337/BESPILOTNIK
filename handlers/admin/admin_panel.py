@@ -1,4 +1,10 @@
+import asyncio
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
 from aiogram import Router, F, Bot
+from typing import List, Optional
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -26,15 +32,28 @@ from database.db import (
     get_assigned_appeals,
     get_defect_reports,
     add_exam_record,
+    update_exam_record,
     get_exam_records,
     add_defect_report,
+    get_appeal,
     set_code_word,
     get_training_centers,
     update_training_center,
     add_training_center,
     get_exam_records_by_personal_number,
 )
-from config import MAIN_ADMIN_IDS, TOKEN
+from config import (
+    MAIN_ADMIN_IDS,
+    TOKEN,
+    API_BASE_URL,
+    API_FILE_BASE_URL,
+    LOCAL_BOT_API_DATA_DIR,
+    LOCAL_BOT_API_REMOTE_DIR,
+    LOCAL_BOT_API_CACHE_DIR,
+    EXAM_VIDEOS_DIR,
+    EXAM_PHOTOS_DIR,
+    DEFECT_MEDIA_DIR,
+)
 from datetime import datetime
 import logging
 from aiogram.exceptions import TelegramBadRequest
@@ -43,12 +62,28 @@ import pandas as pd
 import json
 from utils.validators import validate_media
 from utils.statuses import APPEAL_STATUSES
+from utils.video import compress_video
+from utils.storage import build_public_url
 import aiohttp
-import os
+from aiohttp import ClientError
+import shutil
+from pathlib import PurePosixPath
+import re
 
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+
+class LocalBotAPIConfigurationError(RuntimeError):
+    """Возникает, когда локальный Bot API запущен в режиме --local без корректного каталога данных."""
+
+
+@dataclass
+class DownloadResult:
+    local_path: str
+    source_path: Optional[Path] = None
+
 
 
 class AdminResponse(StatesGroup):
@@ -56,9 +91,12 @@ class AdminResponse(StatesGroup):
     edit_channel = State()
     add_employee = State()
     defect_report_serial = State()
+    defect_report_action = State()
+    defect_report_new_serial = State()
+    defect_report_confirm_serial = State()
     defect_report_location = State()
+    defect_report_comment = State()
     defect_report_media = State()
-    defect_status_serial = State()
     exam_fio = State()
     exam_personal_number = State()
     exam_military_unit = State()
@@ -77,57 +115,347 @@ class AdminResponse(StatesGroup):
     edit_training_center_link = State()
 
 
-async def download_from_local_api(file_id: str, token: str, base_dir: str) -> str:
-    async with aiohttp.ClientSession() as session:
-        # Проверка локального сервера
-        async with session.get(
-            f"http://localhost:8081/bot{token}/getMe", ssl=False
-        ) as test_resp:
-            logger.debug(
-                f"Тестовый запрос к http://localhost:8081/bot{token}/getMe, статус: {test_resp.status}"
+COLON_VARIANTS = (":", "\uf03a", "\uff1a", "\ufe55", "\ufe13", "\u2236")
+
+
+DEFECT_ACTION_LABELS = {
+    "repair": "Ремонт",
+    "replacement": "Замена",
+}
+
+
+def _replace_colon_variants(value: str, replacement: str) -> str:
+    for variant in COLON_VARIANTS:
+        value = value.replace(variant, replacement)
+    return value
+
+
+def _sanitize_component_for_storage(component: str) -> str:
+    sanitized = _replace_colon_variants(component, "_")
+    return sanitized
+
+
+def _normalize_component(component: str) -> str:
+    normalized = _replace_colon_variants(component, "")
+    return normalized.replace("_", "").replace("-", "").lower()
+
+
+def _safe_log_arg(arg):
+    if isinstance(arg, (Path, PurePosixPath)):
+        arg = str(arg)
+    if isinstance(arg, str):
+        return arg.encode("ascii", errors="backslashreplace").decode("ascii")
+
+    try:
+        return str(arg)
+    except Exception:
+        return repr(arg)
+
+
+def _safe_log_args(*args):
+    return tuple(_safe_log_arg(arg) for arg in args)
+
+
+def _sanitize_filename_component(value: str) -> str:
+    replaced = _replace_colon_variants(value or "", " ")
+    cleaned = re.sub(r"[\s]+", "_", replaced.strip())
+    cleaned = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_\-]", "_", cleaned)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    return cleaned or "media"
+
+
+def _exam_media_basename(fio: str, training_center: str) -> str:
+    fio_component = _sanitize_filename_component(fio)
+    center_component = _sanitize_filename_component(training_center)
+    return "_".join(part for part in [fio_component, center_component] if part)
+
+
+def _ensure_unique_media_path(directory: Path, base_name: str, suffix: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    candidate = directory / f"{base_name}{suffix}"
+    counter = 1
+    while candidate.exists():
+        candidate = directory / f"{base_name}_{counter}{suffix}"
+        counter += 1
+    return candidate
+
+
+def _defect_media_directory(media_type: str) -> Path:
+    subfolder = "videos" if media_type in {"video", "video_note"} else "photos"
+    return Path(DEFECT_MEDIA_DIR) / subfolder
+
+
+def _defect_media_basename(serial: str, action: str) -> str:
+    serial_component = _sanitize_filename_component(serial or "defect")
+    action_component = _sanitize_filename_component(action or "action")
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    return "_".join(
+        part for part in [serial_component, action_component, timestamp] if part
+    )
+
+
+def _single_back_keyboard(callback_data: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=callback_data)]]
+    )
+
+
+async def _resolve_training_center_name(
+    state: FSMContext,
+    state_data: dict,
+    db_pool,
+    training_center_id: int,
+) -> str:
+    name = state_data.get("training_center_name")
+    if name:
+        return name
+    fetched = None
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            fetched = await conn.fetchval(
+                "SELECT center_name FROM training_centers WHERE id = $1",
+                training_center_id,
             )
-            if test_resp.status != 200:
-                raise Exception(f"Сервер недоступен: HTTP {test_resp.status}")
-        # Получаем file_path
-        async with session.get(
-            f"http://localhost:8081/bot{token}/getFile?file_id={file_id}", ssl=False
-        ) as resp:
-            logger.debug(
-                f"HTTP-запрос getFile: http://localhost:8081/bot{token}/getFile?file_id={file_id}, статус: {resp.status}"
+    name = fetched or f"УТЦ_{training_center_id}"
+    await state.update_data(training_center_name=name)
+    return name
+
+
+async def _cleanup_source_file(path: Optional[Path]) -> None:
+    if not path:
+        return
+
+    def _remove(target: Path) -> None:
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            return
+        except Exception as exc:  # pragma: no cover - диагностика окружения
+            logger.warning(
+                "Не удалось удалить исходный файл %s: %s",
+                *_safe_log_args(target, exc),
             )
-            if resp.status != 200:
+
+    await asyncio.to_thread(_remove, path)
+
+
+def _candidate_component_names(component: str) -> List[str]:
+    variants = {component}
+
+    if any(variant in component for variant in COLON_VARIANTS):
+        variants.add(_replace_colon_variants(component, "_"))
+        variants.add(_replace_colon_variants(component, "-"))
+        variants.add(_replace_colon_variants(component, ""))
+        for variant in COLON_VARIANTS:
+            if variant in component or ":" in component:
+                variants.add(component.replace(":", variant))
+                variants.add(_replace_colon_variants(component, variant))
+    return list(variants)
+
+
+def _resolve_local_path(local_data_root: Path, remote_relative: PurePosixPath) -> Optional[Path]:
+    try:
+        candidate = local_data_root.joinpath(*remote_relative.parts)
+        if candidate.exists():
+            return candidate
+    except (OSError, ValueError):
+        pass
+
+    current_paths = [local_data_root]
+    for part in remote_relative.parts:
+        next_paths = []
+        for base in current_paths:
+            resolved = None
+            for variant in _candidate_component_names(part):
+                candidate = base / variant
+                if candidate.exists():
+                    resolved = candidate
+                    break
+            if resolved is None:
+                normalized_target = _normalize_component(part)
+                try:
+                    for child in base.iterdir():
+                        if _normalize_component(child.name) == normalized_target:
+                            resolved = child
+                            break
+                except OSError:
+                    resolved = None
+            if resolved is not None:
+                next_paths.append(resolved)
+        if not next_paths:
+            return None
+        current_paths = next_paths
+    return current_paths[0] if current_paths else None
+
+
+async def download_from_local_api(file_id: str, token: str, base_dir: str) -> DownloadResult:
+    base_path = Path(base_dir)
+    base_path.mkdir(parents=True, exist_ok=True)
+
+    api_base_url = API_BASE_URL.format(token=token).rstrip("/")
+    file_base_url = API_FILE_BASE_URL.format(token=token).rstrip("/")
+    remote_data_root = PurePosixPath(LOCAL_BOT_API_REMOTE_DIR.rstrip("/"))
+    local_data_root = Path(LOCAL_BOT_API_DATA_DIR) if LOCAL_BOT_API_DATA_DIR else None
+
+    async def _download_via_telegram(
+        session: aiohttp.ClientSession,
+        preferred_relative: Optional[PurePosixPath],
+    ) -> DownloadResult:
+        logger.info(
+            "Локальный бот API недоступен, загружаем файл %s через публичный API Telegram",
+            file_id,
+        )
+        async with session.get(
+            f"https://api.telegram.org/bot{token}/getFile", params={"file_id": file_id}
+        ) as get_file_resp:
+            if get_file_resp.status != 200:
+                body = await get_file_resp.text()
                 raise Exception(
-                    f"Ошибка getFile: HTTP {resp.status}, ответ: {await resp.text()}"
+                    f"Ошибка Telegram getFile: HTTP {get_file_resp.status}, ответ: {body}"
                 )
-            data = await resp.json()
-            if not data.get("ok"):
-                raise Exception(f"Ошибка getFile: {data}")
-            file_path = data["result"]["file_path"]
-            logger.debug(f"Получен file_path: {file_path}")
-            # Обрезаем только префикс /var/lib/telegram-bot-api/
-            if file_path.startswith("/var/lib/telegram-bot-api/"):
-                file_path = file_path.replace("/var/lib/telegram-bot-api/", "", 1)
-            # Формируем относительный путь для HTTP и локального доступа
-            relative_path = file_path
-            local_path = os.path.join(base_dir, relative_path.replace("/", os.sep))
-            # Проверяем, есть ли файл на диске
-            if os.path.exists(local_path):
-                logger.debug(f"Файл найден локально: {local_path}")
-                return local_path
-            # Fallback на HTTP
-            url = f"http://localhost:8081/file/bot{token}/{relative_path}"
-            async with session.get(url, ssl=False) as resp:
-                logger.debug(f"HTTP-запрос к {url}, статус: {resp.status}")
+            data = await get_file_resp.json()
+
+        telegram_relative = PurePosixPath(data["result"]["file_path"])
+        relative = preferred_relative or telegram_relative
+        safe_relative = Path(*(_sanitize_component_for_storage(p) for p in relative.parts))
+        destination = base_path / safe_relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        async with session.get(
+            f"https://api.telegram.org/file/bot{token}/{telegram_relative.as_posix()}"
+        ) as file_resp:
+            if file_resp.status != 200:
+                body = await file_resp.text()
+                raise Exception(
+                    f"Ошибка загрузки файла Telegram: HTTP {file_resp.status}, ответ: {body}"
+                )
+            with destination.open("wb") as file_obj:
+                async for chunk in file_resp.content.iter_chunked(1 << 14):
+                    file_obj.write(chunk)
+        logger.debug(
+            "Файл %s загружен через Telegram API: %s",
+            *_safe_log_args(file_id, destination),
+        )
+        return DownloadResult(str(destination))
+
+    remote_relative: Optional[PurePosixPath] = None
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(f"{api_base_url}/getMe", ssl=False) as test_resp:
+                logger.debug(
+                    "Тестовый запрос к %s/getMe, статус: %s",
+                    api_base_url,
+                    test_resp.status,
+                )
+                if test_resp.status != 200:
+                    raise Exception(f"Сервер недоступен: HTTP {test_resp.status}")
+
+            async with session.get(
+                f"{api_base_url}/getFile", params={"file_id": file_id}, ssl=False
+            ) as resp:
+                logger.debug(
+                    "HTTP-запрос getFile: %s/getFile?file_id=%s, статус: %s",
+                    api_base_url,
+                    file_id,
+                    resp.status,
+                )
                 if resp.status != 200:
                     raise Exception(
-                        f"Ошибка загрузки файла: HTTP {resp.status}, ответ: {await resp.text()}"
+                        f"Ошибка getFile: HTTP {resp.status}, ответ: {await resp.text()}"
                     )
-                content = await resp.read()
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                with open(local_path, "wb") as f:
-                    f.write(content)
-                logger.debug(f"Файл загружен через HTTP и сохранён: {local_path}")
-            return local_path
+                data = await resp.json()
+                if not data.get("ok"):
+                    raise Exception(f"Ошибка getFile: {data}")
+                file_path = data["result"]["file_path"]
+                logger.debug("Получен file_path: %s", file_path)
+
+                sanitized_path = file_path
+                is_remote_local = file_path.startswith(f"{remote_data_root}/")
+                if is_remote_local:
+                    sanitized_path = file_path.replace(f"{remote_data_root}/", "", 1)
+
+                remote_relative = PurePosixPath(sanitized_path)
+                safe_relative = Path(
+                    *(_sanitize_component_for_storage(part) for part in remote_relative.parts)
+                )
+                local_path = base_path / safe_relative
+
+                if is_remote_local:
+                    if not local_data_root:
+                        message = (
+                            "LOCAL_BOT_API_DATA_DIR не настроен, хотя Bot API работает в режиме --local. "
+                            "Укажите путь к примонтированному каталогу данных (file_id=%s)."
+                        ) % file_id
+                        logger.error(message)
+                        raise LocalBotAPIConfigurationError(message)
+
+                    source_path = _resolve_local_path(local_data_root, remote_relative)
+                    if not source_path or not source_path.exists():
+                        formatted_message = (
+                            "Файл %s отсутствует в локальном каталоге Bot API (%s). "
+                            "Проверьте параметр LOCAL_BOT_API_DATA_DIR и монтирование тома."
+                        ) % (file_id, remote_relative)
+                        logger.error(formatted_message)
+                        raise LocalBotAPIConfigurationError(formatted_message)
+
+                    if local_path.exists():
+                        logger.debug(
+                            "Файл %s уже скопирован локально: %s",
+                            *_safe_log_args(file_id, local_path),
+                        )
+                        return DownloadResult(str(local_path))
+
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        await asyncio.to_thread(shutil.copy2, source_path, local_path)
+                        logger.debug(
+                            "Файл %s скопирован из локального каталога %s в %s",
+                            *_safe_log_args(file_id, source_path, local_path),
+                        )
+                        return DownloadResult(str(local_path), source_path)
+                    except Exception as copy_exc:
+                        logger.warning(
+                            "Не удалось скопировать файл %s из %s: %s",
+                            *_safe_log_args(file_id, source_path, copy_exc),
+                        )
+
+                if local_path.exists():
+                    logger.debug(
+                        "Файл найден локально: %s", *_safe_log_args(local_path)
+                    )
+                    return DownloadResult(str(local_path))
+
+                url = f"{file_base_url}/{remote_relative.as_posix()}"
+                async with session.get(url, ssl=False) as file_resp:
+                    logger.debug("HTTP-запрос к %s, статус: %s", url, file_resp.status)
+                    if file_resp.status != 200:
+                        raise Exception(
+                            f"Ошибка загрузки файла: HTTP {file_resp.status}, ответ: {await file_resp.text()}"
+                        )
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    with local_path.open("wb") as f:
+                        async for chunk in file_resp.content.iter_chunked(1 << 14):
+                            f.write(chunk)
+                    logger.debug(
+                        "Файл загружен через локальный HTTP и сохранён: %s",
+                        *_safe_log_args(local_path),
+                    )
+                return DownloadResult(str(local_path))
+        except LocalBotAPIConfigurationError:
+            raise
+        except (ClientError, asyncio.TimeoutError) as exc:
+            logger.warning(
+                "Локальный Telegram Bot API недоступен (%s), выполняем загрузку через публичный API",
+                exc,
+            )
+            return await _download_via_telegram(session, None)
+        except Exception as exc:
+            logger.warning(
+                "Ошибка при загрузке файла через локальный API: %s. Пробуем публичный API",
+                exc,
+            )
+            return await _download_via_telegram(session, remote_relative)
 
 
 @router.callback_query(F.data == "admin_panel")
@@ -170,7 +498,13 @@ async def select_exam_record(callback: CallbackQuery, state: FSMContext, **data)
     exam_id = int(callback.data.split("_")[-1])
     async with db_pool.acquire() as conn:
         record = await conn.fetchrow(
-            "SELECT * FROM exam_records WHERE exam_id = $1", exam_id
+            """
+            SELECT er.*, tc.center_name
+            FROM exam_records er
+            LEFT JOIN training_centers tc ON er.training_center_id = tc.id
+            WHERE er.exam_id = $1
+            """,
+            exam_id,
         )
         if not record:
             await callback.message.edit_text(
@@ -198,6 +532,9 @@ async def select_exam_record(callback: CallbackQuery, state: FSMContext, **data)
         callsign=record["callsign"],
         specialty=record["specialty"],
         contact=record["contact"],
+        training_center_id=record["training_center_id"],
+        training_center_name=record.get("center_name")
+        or f"УТЦ_{record['training_center_id']}",
     )
     await callback.message.edit_text(
         "Прикрепите видео:",
@@ -507,6 +844,8 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
         await state.clear()
         return
 
+    download_result: Optional[DownloadResult] = None
+
     try:
         if message.video.file_size > 2_000_000_000:  # Проверка размера (2 ГБ)
             await message.answer(
@@ -548,12 +887,56 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
             await state.clear()
             return
 
-        local_path = await download_from_local_api(
+        download_result = await download_from_local_api(
             file_id=message.video.file_id,
             token=TOKEN,
-            base_dir="C:/Users/hrome/BESPILOTNIK_files/telegram-bot-api-files",
+            base_dir=LOCAL_BOT_API_CACHE_DIR,
         )
-        await state.update_data(video_link=local_path)
+        local_path = download_result.local_path
+        progress_message = await message.answer(
+            "Видео получено. Выполняется сжатие, это может занять несколько минут..."
+        )
+        try:
+            compressed_path = await compress_video(local_path)
+        except Exception:
+            if progress_message:
+                try:
+                    await progress_message.edit_text(
+                        "Не удалось сжать видео, используем исходный файл."
+                    )
+                except TelegramBadRequest:
+                    pass
+            raise
+        else:
+            if progress_message:
+                try:
+                    if Path(compressed_path) == Path(local_path):
+                        await progress_message.edit_text(
+                            "Сжатие не потребовалось, используем исходный файл."
+                        )
+                    else:
+                        await progress_message.edit_text("Сжатие завершено ✅")
+                except TelegramBadRequest:
+                    pass
+        fio = state_data.get("fio", "")
+        training_center_id = state_data.get("training_center_id")
+        training_center_name = await _resolve_training_center_name(
+            state,
+            state_data,
+            db_pool,
+            training_center_id,
+        ) if training_center_id is not None else _sanitize_filename_component("неизвестно")
+
+        compressed_file = Path(compressed_path)
+        suffix = compressed_file.suffix or ".mp4"
+        base_name = _exam_media_basename(fio, training_center_name)
+        final_path = _ensure_unique_media_path(Path(EXAM_VIDEOS_DIR), base_name, suffix)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        compressed_file.replace(final_path)
+
+        public_url = build_public_url(final_path)
+
+        await state.update_data(video_link=public_url)
         await message.answer(
             "Видео принято. Загрузите фото (до 5 штук) или завершите.",
             reply_markup=InlineKeyboardMarkup(
@@ -567,9 +950,25 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
             ),
         )
         logger.debug(
-            f"Видео принято от @{message.from_user.username} (ID: {message.from_user.id}), file_id: {message.video.file_id}, local_path: {local_path}"
+            f"Видео принято от @{message.from_user.username} (ID: {message.from_user.id}), file_id: {message.video.file_id}, сохранено как {final_path.name}"
         )
         await state.set_state(AdminResponse.exam_photo)
+    except LocalBotAPIConfigurationError as config_error:
+        logger.error(
+            "Ошибка конфигурации локального Bot API при обработке видео от @%s: %s",
+            message.from_user.username,
+            config_error,
+        )
+        await message.answer(
+            "Локальный Bot API работает в режиме --local, но путь к данным не настроен. "
+            "Укажите LOCAL_BOT_API_DATA_DIR и примонтируйте каталог перед повторной загрузкой.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
+                ]
+            ),
+        )
+        await state.clear()
     except Exception as e:
         logger.error(f"Ошибка обработки видео от @{message.from_user.username}: {e}")
         await message.answer(
@@ -581,29 +980,85 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
             ),
         )
         await state.clear()
+    finally:
+        if download_result:
+            await _cleanup_source_file(download_result.source_path)
 
 
 @router.message(StateFilter(AdminResponse.exam_photo))
-async def process_exam_photo(message: Message, state: FSMContext):
+async def process_exam_photo(message: Message, state: FSMContext, **data):
     data_state = await state.get_data()
     photo_links = data_state.get("photo_links", [])
-    bot = Bot(token=TOKEN)
+    db_pool = data.get("db_pool")
     if message.photo:
-        photo_file = await bot.get_file(message.photo[-1].file_id)
-        photo_link = f"https://api.telegram.org/file/bot{TOKEN}/{photo_file.file_path}"
-        photo_links.append(photo_link)
-        await state.update_data(photo_links=photo_links)
-        await message.answer(
-            f"Фото добавлено ({len(photo_links)}/10). Прикрепите ещё или нажмите 'Готово':",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="Готово", callback_data="finish_exam")]
-                ]
-            ),
-        )
-        logger.debug(
-            f"Фото добавлено для экзамена от @{message.from_user.username} (ID: {message.from_user.id})"
-        )
+        download_result = None
+        try:
+            download_result = await download_from_local_api(
+                file_id=message.photo[-1].file_id,
+                token=TOKEN,
+                base_dir=str(Path(LOCAL_BOT_API_CACHE_DIR) / "photos"),
+            )
+            source_path = Path(download_result.local_path)
+            suffix = source_path.suffix or ".jpg"
+            fio = data_state.get("fio", "")
+            training_center_id = data_state.get("training_center_id")
+            training_center_name = await _resolve_training_center_name(
+                state,
+                data_state,
+                db_pool,
+                training_center_id,
+            ) if training_center_id is not None else _sanitize_filename_component("центр")
+            base_name = _exam_media_basename(fio, training_center_name)
+            indexed_base = f"{base_name}_{len(photo_links) + 1}"
+            final_path = _ensure_unique_media_path(
+                Path(EXAM_PHOTOS_DIR), indexed_base, suffix
+            )
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.replace(final_path)
+            photo_links.append(build_public_url(final_path))
+            await state.update_data(photo_links=photo_links)
+            await message.answer(
+                f"Фото добавлено ({len(photo_links)}/10). Прикрепите ещё или нажмите 'Готово':",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="Готово", callback_data="finish_exam")]
+                    ]
+                ),
+            )
+            logger.debug(
+                f"Фото добавлено для экзамена от @{message.from_user.username} (ID: {message.from_user.id}), сохранено как {final_path.name}"
+            )
+        except LocalBotAPIConfigurationError as config_error:
+            logger.error(
+                "Ошибка конфигурации локального Bot API при сохранении фото экзамена: %s",
+                config_error,
+            )
+            await message.answer(
+                "Локальный Bot API работает в режиме --local, но путь к данным не настроен. "
+                "Укажите LOCAL_BOT_API_DATA_DIR и примонтируйте каталог перед повторной загрузкой.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="Готово", callback_data="finish_exam")]
+                    ]
+                ),
+            )
+        except Exception as exc:
+            logger.error(
+                "Ошибка сохранения фото для экзамена от @%s: %s",
+                message.from_user.username,
+                exc,
+            )
+            await message.answer(
+                "Не удалось сохранить фото. Попробуйте снова или завершите без фото.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="Готово", callback_data="finish_exam")]
+                    ]
+                ),
+            )
+        finally:
+            if download_result:
+                await _cleanup_source_file(download_result.source_path)
     else:
         await message.answer(
             "Пожалуйста, прикрепите фото или нажмите 'Готово'.",
@@ -616,7 +1071,6 @@ async def process_exam_photo(message: Message, state: FSMContext):
         logger.warning(
             f"Некорректный ввод фото для экзамена от @{message.from_user.username}"
         )
-    await bot.session.close()
 
 
 @router.callback_query(
@@ -658,7 +1112,16 @@ async def process_training_center(callback: CallbackQuery, state: FSMContext, **
         await callback.answer("Ошибка: сообщение не найдено.", show_alert=True)
         return
     training_center_id = int(callback.data.split("_")[-1])
-    await state.update_data(training_center_id=training_center_id)
+    center_name = None
+    async with db_pool.acquire() as conn:
+        center_name = await conn.fetchval(
+            "SELECT center_name FROM training_centers WHERE id = $1",
+            training_center_id,
+        )
+    await state.update_data(
+        training_center_id=training_center_id,
+        training_center_name=center_name or f"УТЦ_{training_center_id}",
+    )
     await callback.message.edit_text(
         "Прикрепите видео:",
         reply_markup=InlineKeyboardMarkup(
@@ -734,21 +1197,37 @@ async def finish_exam(callback: CallbackQuery, state: FSMContext, **data):
         video_link = state_data["video_link"]
         photo_links = state_data.get("photo_links", [])
 
-        exam_id = await add_exam_record(
-            fio=fio,
-            personal_number=personal_number,
-            military_unit=military_unit,
-            subdivision=subdivision,
-            callsign=callsign,
-            specialty=specialty,
-            contact=contact,
-            training_center_id=training_center_id,
-            video_link=video_link,
-            photo_links=json.dumps(photo_links),
-        )
+        existing_exam_id = state_data.get("exam_id")
+        now_str = datetime.now().strftime("%Y-%m-%dT%H:%M")
+
+        if existing_exam_id:
+            await update_exam_record(
+                exam_id=existing_exam_id,
+                video_link=video_link,
+                photo_links=photo_links,
+                accepted_date=now_str,
+            )
+            exam_id = existing_exam_id
+            result_text = "обновлён"
+        else:
+            exam_id = await add_exam_record(
+                fio=fio,
+                subdivision=subdivision,
+                military_unit=military_unit,
+                callsign=callsign,
+                specialty=specialty,
+                contact=contact,
+                personal_number=personal_number,
+                training_center_id=training_center_id,
+                video_link=video_link,
+                photo_links=photo_links,
+                application_date=now_str,
+                accepted_date=now_str,
+            )
+            result_text = "успешно добавлен"
 
         await callback.message.edit_text(
-            f"Экзамен №{exam_id} успешно добавлен!",
+            f"Экзамен №{exam_id} {result_text}!",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
@@ -756,7 +1235,7 @@ async def finish_exam(callback: CallbackQuery, state: FSMContext, **data):
             ),
         )
         logger.info(
-            f"Экзамен №{exam_id} добавлен пользователем @{callback.from_user.username}"
+            f"Экзамен №{exam_id} {result_text} пользователем @{callback.from_user.username}"
         )
         await state.clear()
     except Exception as e:
@@ -1047,7 +1526,7 @@ async def add_employee_prompt(callback: CallbackQuery, state: FSMContext):
     )
     await callback.message.edit_text(
         "Введите Telegram ID и username сотрудника (формат: ID @username). Если username отсутствует, укажите 'Нет'. "
-        "Узнать свой Telegram ID можно через @userinfobot, отправив ему команду /start.",
+        "Узнать свой Telegram ID можно, отправив команду /getme этому боту.",
         reply_markup=keyboard,
     )
     await state.set_state(AdminResponse.add_employee)
@@ -1651,17 +2130,30 @@ async def process_export_defect_reports(message: Message, state: FSMContext, **d
     data = []
     for report in reports:
         media_links = json.loads(report["media_links"] or "[]")
+
+        def _link(media: dict) -> Optional[str]:
+            if not isinstance(media, dict):
+                return str(media)
+            return media.get("url") or media.get("file_id")
+
         photo_links = [
-            media["file_id"] for media in media_links if media["type"] == "photo"
+            _link(media) for media in media_links if media.get("type") == "photo"
         ]
         video_links = [
-            media["file_id"]
+            _link(media)
             for media in media_links
-            if media["type"] in ["video", "video_note"]
+            if media.get("type") in ["video", "video_note"]
         ]
+        photo_links = [link for link in photo_links if link]
+        video_links = [link for link in video_links if link]
         data.append(
             {
-                "Serial": report["serial"],
+                "Старый серийный номер": report["serial"],
+                "Новый серийный номер": report.get("new_serial") or "Не указан",
+                "Действие": "Замена"
+                if report.get("action") == "replacement"
+                else "Ремонт",
+                "Комментарий": report.get("comment") or "Не указан",
                 "Дата": report["report_date"],
                 "Время": report["report_time"],
                 "Место": report["location"],
@@ -1705,56 +2197,304 @@ async def process_defect_serial(message: Message, state: FSMContext):
             f"Пустой серийный номер для отчёта о дефекте от @{message.from_user.username}"
         )
         return
-    await state.update_data(serial=serial)
+    data_state = await state.get_data()
+    return_callback = data_state.get("return_callback", "defect_menu")
+    preset_action = data_state.get("action")
+    update_payload = dict(
+        serial=serial,
+        media_links=[],
+        new_serial=None,
+        comment=None,
+        return_callback=return_callback,
+    )
+    if preset_action not in {"repair", "replacement"}:
+        update_payload["action"] = None
+    await state.update_data(**update_payload)
+    if preset_action in {"repair", "replacement"}:
+        if preset_action == "replacement":
+            await message.answer(
+                "Введите серийный номер нового устройства:",
+                reply_markup=_single_back_keyboard(return_callback),
+            )
+            await state.set_state(AdminResponse.defect_report_new_serial)
+        else:
+            await message.answer(
+                "Укажите место проведения работ:",
+                reply_markup=_single_back_keyboard(return_callback),
+            )
+            await state.set_state(AdminResponse.defect_report_location)
+        logger.debug(
+            "Обработка серийного номера %s для %s запущена администратором @%s",
+            serial,
+            preset_action,
+            message.from_user.username,
+        )
+        return
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
+            [
+                InlineKeyboardButton(
+                    text="Ремонт", callback_data="choose_defect_action_repair"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Замена",
+                    callback_data="choose_defect_action_replacement",
+                )
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")],
         ]
     )
-    await message.answer("Введите место:", reply_markup=keyboard)
-    await state.set_state(AdminResponse.defect_report_location)
+    await message.answer(
+        "Выберите действие: ремонт или замена.",
+        reply_markup=keyboard,
+    )
+    await state.set_state(AdminResponse.defect_report_action)
     logger.debug(
-        f"Серийный номер {serial} для отчёта о дефекте принят от @{message.from_user.username}"
+        "Выбор действия для отчёта о дефекте по серийному номеру %s запрошен у @%s",
+        serial,
+        message.from_user.username,
+    )
+
+
+@router.callback_query(
+    F.data.in_({"choose_defect_action_repair", "choose_defect_action_replacement"}),
+    StateFilter(AdminResponse.defect_report_action),
+)
+async def choose_defect_action(callback: CallbackQuery, state: FSMContext):
+    data_state = await state.get_data()
+    serial = data_state.get("serial")
+    return_callback = data_state.get("return_callback", "defect_menu")
+    if not serial:
+        await callback.answer("Не найден серийный номер", show_alert=True)
+        await state.clear()
+        return
+    action = (
+        "repair"
+        if callback.data == "choose_defect_action_repair"
+        else "replacement"
+    )
+    await state.update_data(action=action)
+    if action == "replacement":
+        await callback.message.edit_text(
+            "Введите серийный номер нового устройства:",
+            reply_markup=_single_back_keyboard(return_callback),
+        )
+        await state.set_state(AdminResponse.defect_report_new_serial)
+    else:
+        await callback.message.edit_text(
+            "Укажите место проведения работ:",
+            reply_markup=_single_back_keyboard(return_callback),
+        )
+        await state.set_state(AdminResponse.defect_report_location)
+    await callback.answer()
+
+
+@router.message(StateFilter(AdminResponse.defect_report_new_serial))
+async def process_new_serial(message: Message, state: FSMContext):
+    new_serial = (message.text or "").strip()
+    data_state = await state.get_data()
+    return_callback = data_state.get("return_callback", "defect_menu")
+    if not new_serial:
+        await message.answer(
+            "Серийный номер не может быть пустым. Укажите новый серийный номер:",
+            reply_markup=_single_back_keyboard(return_callback),
+        )
+        return
+    await state.update_data(new_serial_candidate=new_serial)
+    await message.answer(
+        "Повторите серийный номер нового устройства для подтверждения:",
+        reply_markup=_single_back_keyboard(return_callback),
+    )
+    await state.set_state(AdminResponse.defect_report_confirm_serial)
+
+
+@router.message(StateFilter(AdminResponse.defect_report_confirm_serial))
+async def confirm_new_serial(message: Message, state: FSMContext):
+    confirmation = (message.text or "").strip()
+    data_state = await state.get_data()
+    expected = data_state.get("new_serial_candidate")
+    return_callback = data_state.get("return_callback", "defect_menu")
+    if not confirmation:
+        await message.answer(
+            "Серийный номер не может быть пустым. Повторите ввод:",
+            reply_markup=_single_back_keyboard(return_callback),
+        )
+        return
+    if confirmation != expected:
+        await message.answer(
+            "Введённые серийные номера не совпадают. Попробуйте снова.",
+            reply_markup=_single_back_keyboard(return_callback),
+        )
+        await state.set_state(AdminResponse.defect_report_new_serial)
+        return
+    await state.update_data(new_serial=confirmation, new_serial_candidate=None)
+    await message.answer(
+        "Укажите место проведения работ:",
+        reply_markup=_single_back_keyboard(return_callback),
+    )
+    await state.set_state(AdminResponse.defect_report_location)
+
+
+async def _start_defect_report_from_appeal(
+    callback: CallbackQuery, state: FSMContext, db_pool, action: str
+) -> None:
+    appeal_id = int(callback.data.split("_")[-1])
+    appeal = await get_appeal(appeal_id)
+    if not appeal:
+        await callback.message.edit_text(
+            "Заявка не найдена.",
+            reply_markup=_single_back_keyboard("main_menu"),
+        )
+        logger.warning(
+            "Заявка №%s не найдена при попытке %s от @%s",
+            appeal_id,
+            action,
+            callback.from_user.username,
+        )
+        await state.clear()
+        return
+    assigned_admin = appeal.get("admin_id")
+    if (
+        callback.from_user.id not in MAIN_ADMIN_IDS
+        and assigned_admin is not None
+        and assigned_admin != callback.from_user.id
+    ):
+        await callback.message.edit_text(
+            "Вы не являетесь исполнителем этой заявки.",
+            reply_markup=_single_back_keyboard(f"view_appeal_{appeal_id}"),
+        )
+        await callback.answer()
+        return
+    async with db_pool.acquire() as conn:
+        admin_exists = await conn.fetchval(
+            "SELECT 1 FROM admins WHERE admin_id = $1", callback.from_user.id
+        )
+        if not admin_exists:
+            if callback.from_user.id in MAIN_ADMIN_IDS:
+                await add_admin(callback.from_user.id, callback.from_user.username or "unknown")
+            else:
+                await callback.message.edit_text(
+                    "Вы не зарегистрированы как сотрудник.",
+                    reply_markup=_single_back_keyboard("main_menu"),
+                )
+                await callback.answer()
+                return
+    return_callback = f"view_appeal_{appeal_id}"
+    await state.clear()
+    await state.update_data(
+        serial=appeal["serial"],
+        media_links=[],
+        action=action,
+        new_serial=None,
+        comment=None,
+        return_callback=return_callback,
+        appeal_id=appeal_id,
+        employee_id=callback.from_user.id,
+    )
+    if action == "replacement":
+        prompt_text = "Введите серийный номер нового устройства:"
+        next_state = AdminResponse.defect_report_new_serial
+    else:
+        prompt_text = "Укажите место проведения работ:"
+        next_state = AdminResponse.defect_report_location
+    await state.set_state(next_state)
+    await callback.message.edit_text(
+        prompt_text,
+        reply_markup=_single_back_keyboard(return_callback),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("repair_appeal_"))
+async def repair_appeal(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=_single_back_keyboard("main_menu"),
+        )
+        return
+    await _start_defect_report_from_appeal(
+        callback, state, db_pool, action="repair"
+    )
+
+
+@router.callback_query(F.data.startswith("replace_appeal_"))
+async def replace_appeal(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=_single_back_keyboard("main_menu"),
+        )
+        return
+    await _start_defect_report_from_appeal(
+        callback, state, db_pool, action="replacement"
     )
 
 
 @router.message(StateFilter(AdminResponse.defect_report_location))
 async def process_defect_location(message: Message, state: FSMContext):
-    location = message.text.strip()
+    location = (message.text or "").strip()
+    data_state = await state.get_data()
+    return_callback = data_state.get("return_callback", "defect_menu")
     if not location:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-            ]
-        )
         await message.answer(
-            "Место не может быть пустым. Попробуйте снова:", reply_markup=keyboard
+            "Место не может быть пустым. Укажите место проведения работ:",
+            reply_markup=_single_back_keyboard(return_callback),
         )
         logger.warning(
-            f"Пустое место для отчёта о дефекте от @{message.from_user.username}"
+            "Пустое место для отчёта о дефекте от @%s",
+            message.from_user.username,
         )
         return
     await state.update_data(location=location)
+    await message.answer(
+        "Добавьте комментарий к отчёту:",
+        reply_markup=_single_back_keyboard(return_callback),
+    )
+    await state.set_state(AdminResponse.defect_report_comment)
+    logger.debug(
+        "Место %s для отчёта о дефекте принято от @%s",
+        location,
+        message.from_user.username,
+    )
+
+
+@router.message(StateFilter(AdminResponse.defect_report_comment))
+async def process_defect_comment(message: Message, state: FSMContext):
+    comment = (message.text or "").strip()
+    data_state = await state.get_data()
+    return_callback = data_state.get("return_callback", "defect_menu")
+    if not comment:
+        await message.answer(
+            "Комментарий не может быть пустым. Добавьте комментарий:",
+            reply_markup=_single_back_keyboard(return_callback),
+        )
+        return
+    await state.update_data(comment=comment)
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Готово", callback_data="done_defect_media")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=return_callback)],
         ]
     )
     await message.answer(
-        "Прикрепите фото/видео (до 10, или нажмите 'Готово'):", reply_markup=keyboard
+        "Прикрепите фото/видео (до 10) или нажмите 'Готово':",
+        reply_markup=keyboard,
     )
     await state.set_state(AdminResponse.defect_report_media)
-    await state.update_data(media_links=[])
-    logger.debug(
-        f"Место {location} для отчёта о дефекте принято от @{message.from_user.username}"
-    )
 
 
 @router.message(StateFilter(AdminResponse.defect_report_media))
 async def process_defect_media(message: Message, state: FSMContext):
     data_state = await state.get_data()
     media_links = data_state.get("media_links", [])
+    return_callback = data_state.get("return_callback", "defect_menu")
     if len(media_links) >= 10:
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -1763,7 +2503,7 @@ async def process_defect_media(message: Message, state: FSMContext):
                         text="Готово", callback_data="done_defect_media"
                     )
                 ],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data=return_callback)],
             ]
         )
         await message.answer(
@@ -1777,25 +2517,69 @@ async def process_defect_media(message: Message, state: FSMContext):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Готово", callback_data="done_defect_media")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=return_callback)],
         ]
     )
     is_valid, media = validate_media(message)
+    download_result = None
     if is_valid:
-        file_id = media[0]["file_id"]
-        file = await message.bot.get_file(file_id)
-        file_path = file.file_path
-        full_link = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-        media[0]["file_id"] = full_link
-        media_links.append(media[0])
-        await state.update_data(media_links=media_links)
-        await message.answer(
-            f"Медиа добавлено ({len(media_links)}/10). Приложите ещё или нажмите 'Готово':",
-            reply_markup=keyboard,
-        )
-        logger.debug(
-            f"Медиа ({media[0]['type']}) добавлено для отчёта о дефекте от @{message.from_user.username}: {full_link}"
-        )
+        media_item = media[0]
+        media_type = media_item["type"]
+        try:
+            cache_dir = Path(LOCAL_BOT_API_CACHE_DIR) / "defects"
+            download_result = await download_from_local_api(
+                file_id=media_item["file_id"],
+                token=TOKEN,
+                base_dir=str(cache_dir),
+            )
+            source_path = Path(download_result.local_path)
+            suffix = source_path.suffix
+            if not suffix:
+                suffix = ".mp4" if media_type != "photo" else ".jpg"
+            serial = data_state.get("serial", "")
+            action = data_state.get("action", "")
+            base_name = _defect_media_basename(serial, action)
+            indexed_base = f"{base_name}_{len(media_links) + 1}"
+            target_dir = _defect_media_directory(media_type)
+            final_path = _ensure_unique_media_path(target_dir, indexed_base, suffix)
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.replace(final_path)
+            public_url = build_public_url(final_path)
+            media_links.append({"type": media_type, "url": public_url})
+            await state.update_data(media_links=media_links)
+            await message.answer(
+                f"Медиа добавлено ({len(media_links)}/10). Приложите ещё или нажмите 'Готово':",
+                reply_markup=keyboard,
+            )
+            logger.debug(
+                "Медиа (%s) добавлено для отчёта о дефекте от @%s: %s",
+                media_type,
+                message.from_user.username,
+                public_url,
+            )
+        except LocalBotAPIConfigurationError as config_error:
+            logger.error(
+                "Ошибка конфигурации локального Bot API при сохранении медиа для отчёта о дефекте: %s",
+                config_error,
+            )
+            await message.answer(
+                "Локальный Bot API работает в режиме --local, но путь к данным не настроен. "
+                "Укажите LOCAL_BOT_API_DATA_DIR и примонтируйте каталог перед повторной загрузкой.",
+                reply_markup=keyboard,
+            )
+        except Exception as exc:
+            logger.error(
+                "Ошибка сохранения медиа для отчёта о дефекте от @%s: %s",
+                message.from_user.username,
+                exc,
+            )
+            await message.answer(
+                "Не удалось сохранить медиа. Попробуйте снова или завершите без вложений.",
+                reply_markup=keyboard,
+            )
+        finally:
+            if download_result:
+                await _cleanup_source_file(download_result.source_path)
     else:
         await message.answer(
             "Неподдерживаемый формат. Приложите фото (png/jpeg) или видео (mp4).",
@@ -1804,73 +2588,6 @@ async def process_defect_media(message: Message, state: FSMContext):
         logger.warning(
             f"Неподдерживаемый формат медиа для отчёта о дефекте от @{message.from_user.username}"
         )
-
-
-@router.message(StateFilter(AdminResponse.defect_status_serial))
-async def process_defect_status_serial(message: Message, state: FSMContext):
-    serial = message.text.strip()
-    if not serial:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-            ]
-        )
-        await message.answer(
-            "Серийный номер не может быть пустым. Попробуйте снова:",
-            reply_markup=keyboard,
-        )
-        logger.warning(
-            f"Пустой серийный номер для изменения статуса от @{message.from_user.username}"
-        )
-        return
-    await state.update_data(serial=serial)
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Брак", callback_data="set_defect_brak")],
-            [InlineKeyboardButton(text="Возврат", callback_data="set_defect_vozvrat")],
-            [InlineKeyboardButton(text="Замена", callback_data="set_defect_zamena")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")],
-        ]
-    )
-    await message.answer("Выберите статус:", reply_markup=keyboard)
-    logger.debug(
-        f"Серийный номер {serial} для изменения статуса принят от @{message.from_user.username}"
-    )
-
-
-@router.callback_query(F.data.startswith("set_defect_"))
-async def set_defect_status(callback: CallbackQuery, state: FSMContext, **data):
-    db_pool = data.get("db_pool")
-    if not db_pool:
-        logger.error("db_pool отсутствует в data")
-        await callback.message.edit_text(
-            "Ошибка сервера. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-                ]
-            ),
-        )
-        return
-    data_state = await state.get_data()
-    serial = data_state.get("serial")
-    status = callback.data.split("_")[-1]  # brak, vozvrat, zamena
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE serials SET status = $1 WHERE serial = $2", status, serial
-        )
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-        ]
-    )
-    await callback.message.edit_text(
-        f"Статус устройства {serial} изменён на '{status}'.", reply_markup=keyboard
-    )
-    logger.info(
-        f"Статус устройства {serial} изменён на '{status}' пользователем @{callback.from_user.username}"
-    )
-    await state.clear()
 
 
 @router.callback_query(F.data == "done_exam_video")
@@ -1957,25 +2674,75 @@ async def submit_exam(callback: CallbackQuery, state: FSMContext, **data):
     callsign = data_state.get("callsign", "")
     specialty = data_state.get("specialty", "")
     contact = data_state.get("contact", "")
+    personal_number = data_state.get("personal_number", "")
+    training_center_id = data_state.get("training_center_id")
     video_link = data_state.get("video_link", "")
     photo_links = data_state.get("photo_links", [])
-    await add_exam_record(
-        fio,
-        subdivision,
-        military_unit,
-        callsign,
-        specialty,
-        contact,
-        video_link,
-        photo_links,
-    )
+
+    if training_center_id is None:
+        await callback.message.edit_text(
+            "Ошибка: не выбран учебный центр.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
+                ]
+            ),
+        )
+        await state.clear()
+        logger.error(
+            "Не удалось принять экзамен в submit_exam: отсутствует training_center_id"
+        )
+        return
+
+    if isinstance(photo_links, str):
+        try:
+            photo_links = json.loads(photo_links)
+        except json.JSONDecodeError:
+            photo_links = [photo_links]
+
+    if not isinstance(photo_links, list):
+        photo_links = [photo_links]
+
+    existing_exam_id = data_state.get("exam_id")
+    now_str = datetime.now().strftime("%Y-%m-%dT%H:%M")
+
+    if existing_exam_id:
+        await update_exam_record(
+            exam_id=existing_exam_id,
+            video_link=video_link,
+            photo_links=photo_links,
+            accepted_date=now_str,
+        )
+        exam_id = existing_exam_id
+        result_text = "обновлён"
+    else:
+        exam_id = await add_exam_record(
+            fio=fio,
+            subdivision=subdivision,
+            military_unit=military_unit,
+            callsign=callsign,
+            specialty=specialty,
+            contact=contact,
+            personal_number=personal_number,
+            training_center_id=training_center_id,
+            video_link=video_link,
+            photo_links=photo_links,
+            application_date=now_str,
+            accepted_date=now_str,
+        )
+        result_text = "успешно добавлен"
+
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
         ]
     )
-    await callback.message.edit_text("Экзамен принят.", reply_markup=keyboard)
-    logger.info(f"Экзамен принят от @{callback.from_user.username}")
+    await callback.message.edit_text(
+        f"Экзамен №{exam_id} {result_text}.", reply_markup=keyboard
+    )
+    logger.info(
+        f"Экзамен №{exam_id} {result_text} от @{callback.from_user.username}"
+    )
     await state.clear()
 
 
@@ -2008,20 +2775,33 @@ async def export_exams_handler(callback: CallbackQuery, **data):
         )
         return
     data = []
+    time_format = "%Y-%m-%dT%H:%M"
+
+    def format_datetime(value) -> str:
+        if not value:
+            return "Не указана"
+        try:
+            return datetime.strptime(value, time_format).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return value
+
     for record in records:
-        photo_links = json.loads(record["photo_links"] or "[]")
+        record_dict = dict(record)
+        photo_links = json.loads(record_dict.get("photo_links") or "[]")
         data.append(
             {
-                "ФИО": record["fio"],
-                "Личный номер": record["personal_number"],
-                "Подразделение": record["subdivision"],
-                "В/Ч": record["military_unit"],
-                "Позывной": record["callsign"],
-                "Направление": record["specialty"],
-                "Контакт": record["contact"],
-                "УТЦ": record["center_name"] or "Отсутствует",
-                "Видео": record["video_link"] or "Отсутствует",
+                "ФИО": record_dict.get("fio"),
+                "Личный номер": record_dict.get("personal_number"),
+                "Подразделение": record_dict.get("subdivision"),
+                "В/Ч": record_dict.get("military_unit"),
+                "Позывной": record_dict.get("callsign"),
+                "Направление": record_dict.get("specialty"),
+                "Контакт": record_dict.get("contact"),
+                "УТЦ": record_dict.get("center_name") or "Отсутствует",
+                "Видео": record_dict.get("video_link") or "Отсутствует",
                 "Фото": ", ".join(photo_links) or "Отсутствует",
+                "Дата заявки": format_datetime(record_dict.get("application_date")),
+                "Дата приёма": format_datetime(record_dict.get("accepted_date")),
             }
         )
     df = pd.DataFrame(data)
@@ -2041,98 +2821,6 @@ async def export_exams_handler(callback: CallbackQuery, **data):
     logger.info(
         f"Выгрузка экзаменов выполнена пользователем @{callback.from_user.username}"
     )
-
-
-@router.callback_query(F.data == "change_defect_status")
-async def change_defect_status_prompt(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in MAIN_ADMIN_IDS:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-            ]
-        )
-        await callback.message.edit_text("Доступ запрещён.", reply_markup=keyboard)
-        logger.warning(
-            f"Попытка изменения статуса устройства от неадминистратора @{callback.from_user.username}"
-        )
-        return
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-        ]
-    )
-    await callback.message.edit_text("Введите серийный номер:", reply_markup=keyboard)
-    await state.set_state(AdminResponse.defect_status_serial)
-    logger.debug(
-        f"Запрос изменения статуса устройства от @{callback.from_user.username}"
-    )
-
-
-@router.message(StateFilter(AdminResponse.defect_status_serial))
-async def process_defect_status_serial(message: Message, state: FSMContext):
-    serial = message.text.strip()
-    if not serial:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-            ]
-        )
-        await message.answer(
-            "Серийный номер не может быть пустым. Попробуйте снова:",
-            reply_markup=keyboard,
-        )
-        logger.warning(
-            f"Пустой серийный номер для изменения статуса от @{message.from_user.username}"
-        )
-        return
-    await state.update_data(serial=serial)
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Брак", callback_data="set_defect_brak")],
-            [InlineKeyboardButton(text="Возврат", callback_data="set_defect_vozvrat")],
-            [InlineKeyboardButton(text="Замена", callback_data="set_defect_zamena")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")],
-        ]
-    )
-    await message.answer("Выберите статус:", reply_markup=keyboard)
-    logger.debug(
-        f"Серийный номер {serial} для изменения статуса принят от @{message.from_user.username}"
-    )
-
-
-@router.callback_query(F.data.startswith("set_defect_"))
-async def set_defect_status(callback: CallbackQuery, state: FSMContext, **data):
-    db_pool = data.get("db_pool")
-    if not db_pool:
-        logger.error("db_pool отсутствует в data")
-        await callback.message.edit_text(
-            "Ошибка сервера. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-                ]
-            ),
-        )
-        return
-    data_state = await state.get_data()
-    serial = data_state.get("serial")
-    status = callback.data.split("_")[-1]  # brak, vozvrat, zamena
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE serials SET status = $1 WHERE serial = $2", status, serial
-        )
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-        ]
-    )
-    await callback.message.edit_text(
-        f"Статус устройства {serial} изменён на '{status}'.", reply_markup=keyboard
-    )
-    logger.info(
-        f"Статус устройства {serial} изменён на '{status}' пользователем @{callback.from_user.username}"
-    )
-    await state.clear()
 
 
 @router.callback_query(F.data == "defect_menu")
@@ -2175,25 +2863,25 @@ async def defect_menu_prompt(callback: CallbackQuery, **data):
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Добавить отчёт о неисправности",
-                    callback_data="add_defect_report",
+                    text="🛠 Ремонт", callback_data="manual_defect_repair"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="Изменить статус устройства",
-                    callback_data="change_defect_status",
+                    text="🔁 Замена", callback_data="manual_defect_replacement"
                 )
             ],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")],
         ]
     )
-    await callback.message.edit_text("Меню брак/возврат/замена:", reply_markup=keyboard)
+    await callback.message.edit_text("Меню ремонт/замена:", reply_markup=keyboard)
     logger.debug(f"Открыто меню брака от @{callback.from_user.username}")
 
 
-@router.callback_query(F.data == "add_defect_report")
-async def defect_report_prompt(callback: CallbackQuery, state: FSMContext, **data):
+@router.callback_query(
+    F.data.in_({"manual_defect_repair", "manual_defect_replacement"})
+)
+async def manual_defect_prompt(callback: CallbackQuery, state: FSMContext, **data):
     db_pool = data.get("db_pool")
     if not db_pool:
         logger.error("db_pool отсутствует в data")
@@ -2218,7 +2906,10 @@ async def defect_report_prompt(callback: CallbackQuery, state: FSMContext, **dat
             )
             await callback.message.edit_text("Доступ запрещён.", reply_markup=keyboard)
             logger.warning(
-                f"Попытка добавления отчёта о дефекте от неадминистратора @{callback.from_user.username} (ID {callback.from_user.id})"
+                "Попытка доступа к ручному %s от неадминистратора @%s (ID %s)",
+                "ремонту" if callback.data.endswith("repair") else "замене",
+                callback.from_user.username,
+                callback.from_user.id,
             )
             return
         if not admin_exists and callback.from_user.id in MAIN_ADMIN_IDS:
@@ -2228,65 +2919,33 @@ async def defect_report_prompt(callback: CallbackQuery, state: FSMContext, **dat
             logger.info(
                 f"Автоматически добавлен администратор ID {callback.from_user.id} (@{callback.from_user.username})"
             )
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-        ]
+    action = (
+        "repair"
+        if callback.data == "manual_defect_repair"
+        else "replacement"
     )
-    await callback.message.edit_text("Введите серийный номер:", reply_markup=keyboard)
+    await state.clear()
+    await state.update_data(
+        action=action,
+        media_links=[],
+        new_serial=None,
+        comment=None,
+        return_callback="defect_menu",
+    )
+    prompt_text = (
+        "Введите серийный номер текущего устройства:"
+        if action == "replacement"
+        else "Введите серийный номер устройства:"
+    )
+    await callback.message.edit_text(
+        prompt_text,
+        reply_markup=_single_back_keyboard("defect_menu"),
+    )
     await state.set_state(AdminResponse.defect_report_serial)
     logger.debug(
-        f"Запрос добавления отчёта о дефекте от @{callback.from_user.username}"
-    )
-
-
-@router.callback_query(F.data == "change_defect_status")
-async def change_defect_status_prompt(
-    callback: CallbackQuery, state: FSMContext, **data
-):
-    db_pool = data.get("db_pool")
-    if not db_pool:
-        logger.error("db_pool отсутствует в data")
-        await callback.message.edit_text(
-            "Ошибка сервера. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-                ]
-            ),
-        )
-        return
-    async with db_pool.acquire() as conn:
-        admin_exists = await conn.fetchval(
-            "SELECT 1 FROM admins WHERE admin_id = $1", callback.from_user.id
-        )
-        if not admin_exists and callback.from_user.id not in MAIN_ADMIN_IDS:
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-                ]
-            )
-            await callback.message.edit_text("Доступ запрещён.", reply_markup=keyboard)
-            logger.warning(
-                f"Попытка изменения статуса устройства от неадминистратора @{callback.from_user.username} (ID {callback.from_user.id})"
-            )
-            return
-        if not admin_exists and callback.from_user.id in MAIN_ADMIN_IDS:
-            await add_admin(
-                callback.from_user.id, callback.from_user.username or "unknown"
-            )
-            logger.info(
-                f"Автоматически добавлен администратор ID {callback.from_user.id} (@{callback.from_user.username})"
-            )
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-        ]
-    )
-    await callback.message.edit_text("Введите серийный номер:", reply_markup=keyboard)
-    await state.set_state(AdminResponse.defect_status_serial)
-    logger.debug(
-        f"Запрос изменения статуса устройства от @{callback.from_user.username}"
+        "Ручной %s инициирован администратором @%s",
+        "ремонт" if action == "repair" else "замена",
+        callback.from_user.username,
     )
 
 
@@ -2297,16 +2956,36 @@ async def done_defect_media(callback: CallbackQuery, state: FSMContext, **data):
         logger.error("db_pool отсутствует в data")
         await callback.message.edit_text(
             "Ошибка сервера. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-                ]
-            ),
+            reply_markup=_single_back_keyboard("defect_menu"),
         )
         return
     data_state = await state.get_data()
     serial = data_state.get("serial")
-    location = data_state.get("location")  # Получаем location из состояния
+    location = data_state.get("location")
+    action = data_state.get("action")
+    comment = data_state.get("comment")
+    new_serial = data_state.get("new_serial")
+    return_callback = data_state.get("return_callback", "defect_menu")
+    if (
+        not serial
+        or not location
+        or not action
+        or not comment
+        or (action == "replacement" and not new_serial)
+    ):
+        await callback.message.edit_text(
+            "Не удалось сохранить отчёт: заполните все обязательные поля.",
+            reply_markup=_single_back_keyboard(return_callback),
+        )
+        logger.error(
+            "Недостаточно данных для отчёта о дефекте (serial=%s, location=%s, action=%s, comment=%s)",
+            serial,
+            location,
+            action,
+            comment,
+        )
+        await state.clear()
+        return
     report_date = datetime.now().strftime("%Y-%m-%d")
     report_time = datetime.now().strftime("%H:%M")
     media_links = data_state.get("media_links", [])
@@ -2345,31 +3024,27 @@ async def done_defect_media(callback: CallbackQuery, state: FSMContext, **data):
                 location,
                 json.dumps(media_links),
                 employee_id,
+                action,
+                new_serial=new_serial,
+                comment=comment,
             )
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-            ]
-        )
+        keyboard = _single_back_keyboard(return_callback)
         await callback.message.edit_text(
             "Отчёт о дефекте сохранён.", reply_markup=keyboard
         )
         logger.info(
             f"Отчёт о дефекте для серийника {serial} сохранён пользователем @{callback.from_user.username}"
         )
+        await state.clear()
     except Exception as e:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="defect_menu")]
-            ]
-        )
+        keyboard = _single_back_keyboard(return_callback)
         await callback.message.edit_text(
             f"Ошибка сохранения отчёта: {str(e)}", reply_markup=keyboard
         )
         logger.error(
             f"Ошибка сохранения отчёта о дефекте для серийника {serial}: {str(e)}"
         )
-    await state.clear()
+        await state.clear()
 
 
 @router.callback_query(F.data.startswith("employee_appeals_page_"))

@@ -128,10 +128,14 @@ async def create_tables():
                 FOREIGN KEY (serial) REFERENCES serials (serial)
             )
         """)
-        await conn.execute("""
+        await conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS defect_reports (
                 report_id SERIAL PRIMARY KEY,
                 serial TEXT,
+                new_serial TEXT,
+                action TEXT,
+                comment TEXT,
                 report_date TEXT,
                 report_time TEXT,
                 location TEXT,
@@ -140,7 +144,17 @@ async def create_tables():
                 FOREIGN KEY (serial) REFERENCES serials (serial),
                 FOREIGN KEY (employee_id) REFERENCES admins (admin_id)
             )
-        """)
+            """
+        )
+        await conn.execute(
+            "ALTER TABLE defect_reports ADD COLUMN IF NOT EXISTS new_serial TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE defect_reports ADD COLUMN IF NOT EXISTS action TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE defect_reports ADD COLUMN IF NOT EXISTS comment TEXT"
+        )
         await conn.execute("""
                     CREATE TABLE IF NOT EXISTS exam_records (
                         exam_id SERIAL PRIMARY KEY,
@@ -154,9 +168,21 @@ async def create_tables():
                         video_link TEXT,
                         photo_links TEXT,
                         training_center_id INTEGER,
+                        normalized TEXT,
+                        application_date TEXT,
+                        accepted_date TEXT,
                         FOREIGN KEY (training_center_id) REFERENCES training_centers(id)
                     )
                 """)
+        await conn.execute(
+            "ALTER TABLE exam_records ADD COLUMN IF NOT EXISTS normalized TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE exam_records ADD COLUMN IF NOT EXISTS application_date TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE exam_records ADD COLUMN IF NOT EXISTS accepted_date TEXT"
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_messages (
                 message_id BIGINT,
@@ -168,9 +194,13 @@ async def create_tables():
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS manuals (
                 category TEXT PRIMARY KEY,
-                file_id TEXT
+                file_id TEXT,
+                file_name TEXT
             )
         """)
+        await conn.execute(
+            "ALTER TABLE manuals ADD COLUMN IF NOT EXISTS file_name TEXT"
+        )
     logger.info("Таблицы базы данных созданы или проверены")
 
 
@@ -192,15 +222,23 @@ async def add_exam_record(
     training_center_id,
     video_link=None,
     photo_links=None,
+    application_date=None,
+    accepted_date=None,
 ):
     async with pool.acquire() as conn:
         normalized = normalize_personal_number(personal_number)
         logger.debug(
             f"Сохраняемый личный номер: {personal_number}, нормализованный: {normalized}"
         )
+        if application_date is None:
+            application_date = datetime.now().strftime("%Y-%m-%dT%H:%M")
+        if isinstance(photo_links, list):
+            photo_links_payload = json.dumps(photo_links) if photo_links else None
+        else:
+            photo_links_payload = photo_links if photo_links else None
         exam_id = await conn.fetchval(
-            "INSERT INTO exam_records (fio, subdivision, military_unit, callsign, specialty, contact, personal_number, training_center_id, video_link, photo_links, normalized) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING exam_id",
+            "INSERT INTO exam_records (fio, subdivision, military_unit, callsign, specialty, contact, personal_number, training_center_id, video_link, photo_links, normalized, application_date, accepted_date) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING exam_id",
             fio,
             subdivision,
             military_unit,
@@ -210,8 +248,10 @@ async def add_exam_record(
             personal_number,
             training_center_id,
             video_link,
-            json.dumps(photo_links) if photo_links else None,
+            photo_links_payload,
             normalized,
+            application_date,
+            accepted_date,
         )
         logger.info(
             f"Экзамен №{exam_id} добавлен для {fio} с УТЦ ID {training_center_id}"
@@ -219,21 +259,33 @@ async def add_exam_record(
         return exam_id
 
 
-async def update_exam_record(exam_id, video_link=None, photo_links=None):
+async def update_exam_record(
+    exam_id,
+    video_link=None,
+    photo_links=None,
+    accepted_date=None,
+):
     async with pool.acquire() as conn:
         async with conn.transaction():  # Гарантируем коммит транзакции
+            if isinstance(photo_links, list):
+                photo_links_payload = json.dumps(photo_links) if photo_links else None
+            else:
+                photo_links_payload = photo_links if photo_links else None
             result = await conn.execute(
                 """
-                UPDATE exam_records 
-                SET video_link = $1, photo_links = $2
-                WHERE exam_id = $3
+                UPDATE exam_records
+                SET video_link = COALESCE($1, video_link),
+                    photo_links = COALESCE($2, photo_links),
+                    accepted_date = COALESCE($3, accepted_date)
+                WHERE exam_id = $4
             """,
                 video_link,
-                json.dumps(photo_links) if photo_links else None,
+                photo_links_payload,
+                accepted_date,
                 exam_id,
             )
             logger.debug(
-                f"Обновление записи экзамена ID {exam_id}: video_link={video_link}, photo_links={photo_links}, result={result}"
+                f"Обновление записи экзамена ID {exam_id}: video_link={video_link}, photo_links={photo_links}, accepted_date={accepted_date}, result={result}"
             )
         logger.info(
             f"Запись экзамена ID {exam_id} обновлена с видео {video_link} и фото {photo_links}"
@@ -665,7 +717,8 @@ async def start_replacement(appeal_id, old_serial, status="replacement_process")
                 "UPDATE appeals SET status = $1 WHERE appeal_id = $2", status, appeal_id
             )
             await conn.execute(
-                "UPDATE serials SET return_status = 'Возврат' WHERE serial = $1",
+                "UPDATE serials SET return_status = $1 WHERE serial = $2",
+                "replacement",
                 old_serial,
             )
             logger.info(
@@ -730,19 +783,48 @@ async def get_closed_appeals(page=0, limit=10):
 
 
 async def add_defect_report(
-    serial, report_date, report_time, location, media_links, employee_id
+    serial,
+    report_date,
+    report_time,
+    location,
+    media_links,
+    employee_id,
+    action,
+    new_serial=None,
+    comment=None,
 ):
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO defect_reports (serial, report_date, report_time, location, media_links, employee_id) VALUES ($1, $2, $3, $4, $5, $6)",
+            """
+            INSERT INTO defect_reports (
+                serial,
+                new_serial,
+                action,
+                comment,
+                report_date,
+                report_time,
+                location,
+                media_links,
+                employee_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            """,
             serial,
+            new_serial,
+            action,
+            comment,
             report_date,
             report_time,
             location,
             media_links,
             employee_id,
         )
-        logger.info(f"Отчёт о дефекте для серийника {serial} добавлен")
+        logger.info(
+            "Отчёт о дефекте для серийника %s добавлен (действие: %s, новый серийник: %s)",
+            serial,
+            action,
+            new_serial,
+        )
 
 
 async def get_defect_reports(serial=None, serial_from=None, serial_to=None):
@@ -765,26 +847,38 @@ async def get_defect_reports(serial=None, serial_from=None, serial_to=None):
         return reports
 
 
-async def set_manual_file(category, file_id):
+async def set_manual_file(category, file_name):
     async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO manuals (category, file_id)
-            VALUES ($1, $2)
-            ON CONFLICT (category) DO UPDATE SET file_id = EXCLUDED.file_id
-            """,
-            category,
-            file_id,
-        )
+        async with conn.transaction():
+            previous_file = await conn.fetchval(
+                "SELECT file_name FROM manuals WHERE category = $1",
+                category,
+            )
+            await conn.execute(
+                """
+                INSERT INTO manuals (category, file_name, file_id)
+                VALUES ($1, $2, NULL)
+                ON CONFLICT (category)
+                DO UPDATE SET file_name = EXCLUDED.file_name,
+                              file_id = EXCLUDED.file_id
+                """,
+                category,
+                file_name,
+            )
         logger.info(f"Файл руководства '{category}' обновлён")
+        return previous_file
 
 
 async def get_manual_file(category):
     async with pool.acquire() as conn:
-        file_id = await conn.fetchval(
-            "SELECT file_id FROM manuals WHERE category = $1", category
+        record = await conn.fetchrow(
+            "SELECT file_name, file_id FROM manuals WHERE category = $1",
+            category,
+        )
+        has_record = record is not None and (
+            record.get("file_name") or record.get("file_id")
         )
         logger.debug(
-            f"Запрошен файл руководства '{category}': {'найден' if file_id else 'отсутствует'}"
+            f"Запрошен файл руководства '{category}': {'найден' if has_record else 'отсутствует'}"
         )
-        return file_id
+        return dict(record) if record else None

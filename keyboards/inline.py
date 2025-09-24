@@ -19,17 +19,7 @@ def get_user_menu():
                     text="📋 Мои обращения", callback_data="my_appeals_user"
                 )
             ],
-            [
-                InlineKeyboardButton(
-                    text="🚀 Подготовка к запуску", callback_data="prepare_launch"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🎮 Настройка пульта", callback_data="setup_remote"
-                )
-            ],
-            [InlineKeyboardButton(text="🛠 Настройка НСУ", callback_data="setup_nsu")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
         ]
     )
     logger.debug("Создана клавиатура для пользовательского меню")
@@ -41,17 +31,25 @@ def get_manuals_menu():
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Настройка пульта", callback_data="manual_remote"
+                    text="🎮 Настройка пульта", callback_data="manual_remote"
                 )
             ],
-            [InlineKeyboardButton(text="Прошивка ЕРЛС", callback_data="manual_erlc")],
-            [InlineKeyboardButton(text="Настройка НСУ", callback_data="manual_nsu")],
             [
                 InlineKeyboardButton(
-                    text="Руководство по дрону", callback_data="manual_drone"
+                    text="🧰 Прошивка ЕРЛС", callback_data="manual_erlc"
                 )
             ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")],
+            [
+                InlineKeyboardButton(
+                    text="🛰 Настройка НСУ", callback_data="manual_nsu"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📘 Руководство по дрону", callback_data="manual_drone"
+                )
+            ],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
         ]
     )
     logger.debug("Создана клавиатура меню руководств")
@@ -98,7 +96,7 @@ def get_admin_menu(user_id):
     keyboard.append(
         [
             InlineKeyboardButton(
-                text="🛠 Брак/Возврат/Замена", callback_data="defect_menu"
+                text="🛠 Ремонт/Замена", callback_data="defect_menu"
             )
         ]
     )
@@ -131,6 +129,49 @@ def get_my_appeals_user_menu(appeals):
     logger.debug(
         f"Создана клавиатура для 'Мои обращения' пользователя с {len(appeals)} заявками"
     )
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_user_appeal_actions_menu(
+    appeal_id: int, status: str, media_count: int, include_view_button: bool = False
+) -> InlineKeyboardMarkup:
+    keyboard: list[list[InlineKeyboardButton]] = []
+    if include_view_button:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text="📄 Просмотреть заявку",
+                    callback_data=f"view_appeal_user_{appeal_id}",
+                )
+            ]
+        )
+    if media_count > 0:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=f"📸 Медиа ({media_count})",
+                    callback_data=f"show_media_user_{appeal_id}",
+                )
+            ]
+        )
+    if status != "closed":
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text="💬 Ответить", callback_data=f"reply_user_{appeal_id}"
+                )
+            ]
+        )
+    if status in ["new", "in_progress"]:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text="Закрыть заявку",
+                    callback_data=f"close_appeal_user_{appeal_id}",
+                )
+            ]
+        )
+    keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
@@ -168,7 +209,7 @@ def get_open_appeals_menu(appeals, page, total_appeals):
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def get_appeal_actions_menu(appeal_id, status):
+def get_appeal_actions_menu(appeal_id, status, can_service: bool = False):
     keyboard = []
     if status == "new":
         keyboard.append(
@@ -200,7 +241,26 @@ def get_appeal_actions_menu(appeal_id, status):
                 ],
             ]
         )
+        if can_service:
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        text="🔧 Ремонт",
+                        callback_data=f"repair_appeal_{appeal_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="🔁 Замена",
+                        callback_data=f"replace_appeal_{appeal_id}",
+                    ),
+                ]
+            )
     keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+    logger.debug(
+        "Создана клавиатура действий по заявке №%s (статус=%s, сервисные кнопки=%s)",
+        appeal_id,
+        status,
+        can_service,
+    )
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
@@ -443,17 +503,12 @@ def get_defect_status_menu(serial):
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Брак", callback_data=f"defect_status_brak_{serial}"
+                    text="Ремонт", callback_data=f"defect_status_repair_{serial}"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="Возврат", callback_data=f"defect_status_vozvrat_{serial}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Замена", callback_data=f"defect_status_zamena_{serial}"
+                    text="Замена", callback_data=f"defect_status_replacement_{serial}"
                 )
             ],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")],
