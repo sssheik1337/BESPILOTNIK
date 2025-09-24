@@ -34,6 +34,24 @@ class UserState(StatesGroup):
     menu = State()
 
 
+START_IMAGE_NAMES = ("start1.jpg", "start2.jpg", "start3.jpg")
+
+
+def get_start_media() -> list[InputMediaPhoto]:
+    media: list[InputMediaPhoto] = []
+    for image_name in START_IMAGE_NAMES:
+        image_path = public_root() / image_name
+        if not image_path.exists():
+            logger.warning(
+                "Стартовое изображение %s не найдено по пути %s",
+                image_name,
+                image_path,
+            )
+            continue
+        media.append(InputMediaPhoto(media=FSInputFile(image_path)))
+    return media
+
+
 async def clear_serial_state(user_id, state: FSMContext, delay=12 * 3600):
     await asyncio.sleep(delay)
     current_state = await state.get_state()
@@ -113,19 +131,7 @@ async def start_command(message: Message, state: FSMContext, bot: Bot, **data):
     else:
         await state.set_state(UserState.waiting_for_auto_delete)
         try:
-            start_images = ["start1.jpg", "start2.jpg", "start3.jpg"]
-            media = []
-            for image_name in start_images:
-                image_path = public_root() / image_name
-                if not image_path.exists():
-                    logger.warning(
-                        "Стартовое изображение %s не найдено по пути %s",
-                        image_name,
-                        image_path,
-                    )
-                    continue
-                media.append(InputMediaPhoto(media=FSInputFile(image_path)))
-
+            media = get_start_media()
             if media:
                 await bot.send_media_group(chat_id=message.chat.id, media=media)
             await message.answer(
@@ -372,14 +378,11 @@ async def return_to_main_menu(
         else:
             await state.set_state(UserState.waiting_for_auto_delete)
             try:
-                media = [
-                    InputMediaPhoto(media=FSInputFile("/data/start1.jpg")),
-                    InputMediaPhoto(media=FSInputFile("/data/start2.jpg")),
-                    InputMediaPhoto(media=FSInputFile("/data/start3.jpg")),
-                ]
-                await bot.send_media_group(
-                    chat_id=callback.message.chat.id, media=media
-                )
+                media = get_start_media()
+                if media:
+                    await bot.send_media_group(
+                        chat_id=callback.message.chat.id, media=media
+                    )
                 await bot.send_message(
                     chat_id=callback.message.chat.id,
                     text="⚠️В целях безопасности включите автоматическое удаление сообщений через сутки в настройках Telegram.\n"

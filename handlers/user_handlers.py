@@ -31,7 +31,7 @@ import json
 from config import MAIN_ADMIN_IDS
 import logging
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from handlers.common_handlers import UserState  # Импорт UserState
+from handlers.common_handlers import UserState, get_start_media
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +59,6 @@ async def create_appeal_prompt(callback: CallbackQuery, state: FSMContext, bot: 
     if not serial:
         await state.set_state(UserState.waiting_for_auto_delete)
         try:
-            media = [
-                InputMediaPhoto(media=FSInputFile("/data/start1.jpg")),
-                InputMediaPhoto(media=FSInputFile("/data/start2.jpg")),
-                InputMediaPhoto(media=FSInputFile("/data/start3.jpg")),
-            ]
             await callback.message.edit_text(
                 "⚠️В целях безопасности включите автоматическое удаление сообщений через сутки в настройках Telegram.\n"
                 "Инструкция в прикреплённых изображениях.⚠️",
@@ -78,7 +73,9 @@ async def create_appeal_prompt(callback: CallbackQuery, state: FSMContext, bot: 
                     ]
                 ),
             )
-            await bot.send_media_group(chat_id=callback.message.chat.id, media=media)
+            media = get_start_media()
+            if media:
+                await bot.send_media_group(chat_id=callback.message.chat.id, media=media)
             logger.debug(
                 f"Пользователь @{username} (ID: {user_id}) перенаправлен на запрос автоудаления"
             )
