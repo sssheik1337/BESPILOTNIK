@@ -1,4 +1,4 @@
-TOKEN = "8133341294:AAEzBVr7n-K5D-70pY4IZXlaBUH1J2Nlh2A"
+TOKEN = "TELEGRAM TOKEN"
 LOCAL_BOT_API_HOST = "http://localhost:8081"
 LOCAL_BOT_API_REMOTE_DIR = "/var/lib/telegram-bot-api"
 # Укажи путь к примонтированному каталогу данных Telegram Bot API на хосте,
@@ -23,9 +23,9 @@ MAIN_ADMIN_IDS = [7797651918]  # ID главных админов
 DB_PATH = "/data/bot.db"  # Путь к SQLite базе
 
 DB_CONFIG = {
-    "user": "postgres",
-    "password": "Merryweather4670!",
-    "database": "musorok",
+    "user": "пользователь",
+    "password": "пароль бд",
+    "database": "имя бд",
     "host": "localhost",
-    "port": 5432,
+    "port": сюда порт,
 }
