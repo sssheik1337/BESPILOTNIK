@@ -1,9 +1,40 @@
 import re
+
 from aiogram.types import Message
+
+
+PERSONAL_NUMBER_PATTERN = re.compile(r"^[\w\sА-Яа-я-]{2,30}$")
+MILITARY_UNIT_PATTERN = re.compile(r"^[\w\sА-Яа-я/-]{2,40}$")
+SUBDIVISION_PATTERN = re.compile(r"^[\w\sА-Яа-я-]{2,60}$")
+CALLSIGN_PATTERN = re.compile(r"^[\w\sА-Яа-я-]{2,30}$")
 
 
 def validate_serial(serial):
     return bool(re.match(r"^[A-Za-z0-9]{6,20}$", str(serial)))
+
+
+def is_valid_personal_number(value: str) -> bool:
+    if not value:
+        return False
+    return bool(PERSONAL_NUMBER_PATTERN.match(value.strip()))
+
+
+def is_valid_military_unit(value: str) -> bool:
+    if not value:
+        return False
+    return bool(MILITARY_UNIT_PATTERN.match(value.strip()))
+
+
+def is_valid_subdivision(value: str) -> bool:
+    if not value:
+        return False
+    return bool(SUBDIVISION_PATTERN.match(value.strip()))
+
+
+def is_valid_callsign(value: str) -> bool:
+    if not value:
+        return False
+    return bool(CALLSIGN_PATTERN.match(value.strip()))
 
 
 def validate_media(message: Message, max_files=10, max_size_mb=200):

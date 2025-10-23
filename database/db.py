@@ -355,6 +355,81 @@ async def get_exam_records_by_personal_number(personal_number):
         return records
 
 
+async def search_exam_records(query: str):
+    async with pool.acquire() as conn:
+        normalized_query = normalize_personal_number(query)
+        numeric_part = re.sub(r"[^0-9]", "", normalized_query)
+        like_value = f"%{query.lower()}%"
+        conditions = []
+        params = []
+        if normalized_query:
+            conditions.append(f"er.normalized = ${len(params) + 1}")
+            params.append(normalized_query)
+        if numeric_part:
+            conditions.append(
+                f"REGEXP_REPLACE(er.normalized, '[^0-9]', '') = ${len(params) + 1}"
+            )
+            params.append(numeric_part)
+        for column in [
+            "personal_number",
+            "military_unit",
+            "subdivision",
+            "callsign",
+            "specialty",
+        ]:
+            conditions.append(
+                f"LOWER(COALESCE(er.{column}, '')) LIKE ${len(params) + 1}"
+            )
+            params.append(like_value)
+        query_text = " OR ".join(conditions)
+        sql = f"""
+            SELECT er.*, tc.center_name
+            FROM exam_records er
+            LEFT JOIN training_centers tc ON er.training_center_id = tc.id
+            WHERE {query_text}
+            ORDER BY er.exam_id DESC
+        """
+        records = await conn.fetch(sql, *params)
+        logger.info(
+            "Поиск экзаменов по запросу '%s' найдено: %d",
+            query,
+            len(records),
+        )
+        return records
+
+
+async def get_exam_record_by_id(exam_id: int):
+    async with pool.acquire() as conn:
+        record = await conn.fetchrow(
+            """
+            SELECT er.*, tc.center_name
+            FROM exam_records er
+            LEFT JOIN training_centers tc ON er.training_center_id = tc.id
+            WHERE er.exam_id = $1
+        """,
+            exam_id,
+        )
+        if record:
+            logger.debug("Найдена запись экзамена ID %s", exam_id)
+        else:
+            logger.warning("Запись экзамена ID %s не найдена", exam_id)
+        return record
+
+
+async def delete_exam_record(exam_id: int) -> bool:
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM exam_records WHERE exam_id = $1",
+            exam_id,
+        )
+        deleted = result.upper().startswith("DELETE") and result.split()[-1] != "0"
+        if deleted:
+            logger.info("Запись экзамена ID %s удалена", exam_id)
+        else:
+            logger.warning("Не удалось удалить запись экзамена ID %s", exam_id)
+        return deleted
+
+
 async def validate_exam_record(
     fio, personal_number, military_unit, subdivision, specialty, contact
 ):
