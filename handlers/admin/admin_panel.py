@@ -34,6 +34,8 @@ from database.db import (
     add_exam_record,
     update_exam_record,
     get_exam_records,
+    get_exam_record_by_id,
+    delete_exam_record,
     add_defect_report,
     get_appeal,
     set_code_word,
@@ -41,6 +43,7 @@ from database.db import (
     update_training_center,
     add_training_center,
     get_exam_records_by_personal_number,
+    search_exam_records,
 )
 from config import (
     MAIN_ADMIN_IDS,
@@ -60,7 +63,13 @@ from aiogram.exceptions import TelegramBadRequest
 from io import BytesIO
 import pandas as pd
 import json
-from utils.validators import validate_media
+from utils.validators import (
+    validate_media,
+    is_valid_personal_number,
+    is_valid_military_unit,
+    is_valid_subdivision,
+    is_valid_callsign,
+)
 from utils.statuses import APPEAL_STATUSES
 from utils.video import compress_video
 from utils.storage import build_public_url
@@ -107,6 +116,9 @@ class AdminResponse(StatesGroup):
     exam_training_center = State()
     exam_video = State()
     exam_photo = State()
+    exam_delete_query = State()
+    exam_delete_selection = State()
+    exam_delete_confirmation = State()
     report_serial_from = State()
     report_serial_to = State()
     change_code_word = State()
@@ -162,6 +174,12 @@ def _sanitize_filename_component(value: str) -> str:
     cleaned = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_\-]", "_", cleaned)
     cleaned = re.sub(r"_+", "_", cleaned).strip("_")
     return cleaned or "media"
+
+
+def _exam_back_markup(callback: str = "exam_menu") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=callback)]]
+    )
 
 
 def _exam_media_basename(fio: str, training_center: str) -> str:
@@ -587,6 +605,218 @@ async def exam_menu_prompt(callback: CallbackQuery, **data):
     )
 
 
+@router.callback_query(F.data == "delete_exam")
+async def delete_exam_prompt(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=_exam_back_markup("main_menu"),
+        )
+        await callback.answer()
+        return
+    await callback.message.edit_text(
+        "Введите данные для поиска экзамена (личный номер, военная часть, подразделение, позывной или направление):",
+        reply_markup=_exam_back_markup("delete_exam_cancel"),
+    )
+    await state.set_state(AdminResponse.exam_delete_query)
+    await callback.answer()
+    logger.debug(
+        "Пользователь @%s начал поиск записи экзамена для удаления",
+        callback.from_user.username,
+    )
+
+
+@router.message(
+    StateFilter(
+        AdminResponse.exam_delete_query,
+        AdminResponse.exam_delete_selection,
+    )
+)
+async def process_exam_delete_search(message: Message, state: FSMContext, **data):
+    query = (message.text or "").strip()
+    if not query:
+        await message.answer(
+            "Введите значение для поиска.",
+            reply_markup=_exam_back_markup("delete_exam_cancel"),
+        )
+        logger.warning("Пустой запрос на удаление экзамена от @%s", message.from_user.username)
+        return
+    if not data.get("db_pool"):
+        logger.error("db_pool отсутствует в data при поиске удаления экзамена")
+        await state.clear()
+        await message.answer(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=_exam_back_markup("main_menu"),
+        )
+        return
+    records = await search_exam_records(query)
+    if not records:
+        await message.answer(
+            "Совпадений не найдено. Попробуйте другой запрос или вернитесь назад.",
+            reply_markup=_exam_back_markup("delete_exam_cancel"),
+        )
+        logger.info(
+            "По запросу '%s' не найдено записей для удаления экзамена (пользователь @%s)",
+            query,
+            message.from_user.username,
+        )
+        await state.set_state(AdminResponse.exam_delete_query)
+        return
+    limited_records = records[:10]
+    keyboard_rows = [
+        [
+            InlineKeyboardButton(
+                text=(
+                    f"№{record['exam_id']} | {record['fio'] or 'Без ФИО'} | "
+                    f"{record['personal_number'] or 'без номера'}"
+                ),
+                callback_data=f"delete_exam_select_{record['exam_id']}",
+            )
+        ]
+        for record in limited_records
+    ]
+    keyboard_rows.append(
+        [InlineKeyboardButton(text="🔎 Новый поиск", callback_data="delete_exam_restart")]
+    )
+    keyboard_rows.append(
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="delete_exam_cancel")]
+    )
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+    summary = (
+        "Найдены записи. Выберите экзамен для удаления."
+        if len(records) <= len(limited_records)
+        else (
+            "Найдены записи. Показаны первые 10 совпадений. "
+            "Выберите экзамен для удаления."
+        )
+    )
+    await message.answer(summary, reply_markup=markup)
+    await state.update_data(delete_search_query=query)
+    await state.set_state(AdminResponse.exam_delete_selection)
+    logger.info(
+        "По запросу '%s' найдено %d записей для удаления экзамена (пользователь @%s)",
+        query,
+        len(records),
+        message.from_user.username,
+    )
+
+
+@router.callback_query(
+    F.data.startswith("delete_exam_select_"),
+    StateFilter(AdminResponse.exam_delete_selection),
+)
+async def exam_delete_select(callback: CallbackQuery, state: FSMContext, **data):
+    exam_id = int(callback.data.split("_")[-1])
+    record = await get_exam_record_by_id(exam_id)
+    if not record:
+        await callback.answer("Запись не найдена", show_alert=True)
+        logger.warning("Не найдена запись экзамена ID %s для удаления", exam_id)
+        return
+    record_data = dict(record)
+    details = [
+        f"Экзамен №{record_data.get('exam_id')}",
+        f"ФИО: {record_data.get('fio') or 'не указано'}",
+        f"Личный номер: {record_data.get('personal_number') or 'не указан'}",
+        f"В/Ч: {record_data.get('military_unit') or 'не указана'}",
+        f"Подразделение: {record_data.get('subdivision') or 'не указано'}",
+        f"Позывной: {record_data.get('callsign') or 'не указан'}",
+        f"Направление: {record_data.get('specialty') or 'не указано'}",
+    ]
+    if record_data.get("center_name"):
+        details.append(f"УТЦ: {record_data['center_name']}")
+    await callback.message.edit_text(
+        "\n".join(details)
+        + "\n\nПодтвердите удаление выбранной записи.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Удалить",
+                        callback_data=f"delete_exam_confirm_{exam_id}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🔎 Новый поиск", callback_data="delete_exam_restart"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="⬅️ Назад", callback_data="delete_exam_cancel"
+                    )
+                ],
+            ]
+        ),
+    )
+    await state.update_data(selected_exam_id=exam_id)
+    await state.set_state(AdminResponse.exam_delete_confirmation)
+    await callback.answer()
+    logger.debug("Пользователь @%s подтверждает удаление экзамена ID %s", callback.from_user.username, exam_id)
+
+
+@router.callback_query(
+    F.data.startswith("delete_exam_confirm_"),
+    StateFilter(AdminResponse.exam_delete_confirmation),
+)
+async def exam_delete_confirm(callback: CallbackQuery, state: FSMContext, **data):
+    exam_id = int(callback.data.split("_")[-1])
+    state_data = await state.get_data()
+    if state_data.get("selected_exam_id") != exam_id:
+        await callback.answer("Выберите запись из списка", show_alert=True)
+        logger.warning(
+            "Несовпадение выбранного экзамена при удалении: %s != %s",
+            state_data.get("selected_exam_id"),
+            exam_id,
+        )
+        return
+    deleted = await delete_exam_record(exam_id)
+    if not deleted:
+        await callback.answer("Не удалось удалить запись", show_alert=True)
+        logger.error("Ошибка удаления экзамена ID %s", exam_id)
+        return
+    await callback.message.edit_text(
+        f"Экзамен №{exam_id} удалён.",
+        reply_markup=_exam_back_markup("exam_menu"),
+    )
+    await state.clear()
+    await callback.answer()
+    logger.info("Экзамен ID %s удалён пользователем @%s", exam_id, callback.from_user.username)
+
+
+@router.callback_query(
+    F.data == "delete_exam_restart",
+    StateFilter(
+        AdminResponse.exam_delete_selection,
+        AdminResponse.exam_delete_confirmation,
+    ),
+)
+async def exam_delete_restart(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "Введите данные для поиска экзамена (личный номер, военная часть, подразделение, позывной или направление):",
+        reply_markup=_exam_back_markup("delete_exam_cancel"),
+    )
+    await state.set_state(AdminResponse.exam_delete_query)
+    await callback.answer()
+    logger.debug("Пользователь @%s перезапустил поиск удаления экзамена", callback.from_user.username)
+
+
+@router.callback_query(
+    F.data == "delete_exam_cancel",
+    StateFilter(
+        AdminResponse.exam_delete_query,
+        AdminResponse.exam_delete_selection,
+        AdminResponse.exam_delete_confirmation,
+    ),
+)
+async def exam_delete_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("Меню экзаменов:", reply_markup=get_exam_menu())
+    await callback.answer()
+    logger.debug("Пользователь @%s отменил удаление экзамена", callback.from_user.username)
+
+
 @router.callback_query(F.data == "take_exam")
 async def take_exam_prompt(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
@@ -628,6 +858,23 @@ async def process_personal_number(
     message: Message, state: FSMContext, bot: Bot, **data
 ):
     personal_number = message.text.strip()
+    if not is_valid_personal_number(personal_number):
+        await message.answer(
+            "Некорректный формат личного номера. Используйте буквы и цифры, например АВ-449852. Попробуйте снова:",
+            reply_markup=_exam_back_markup(),
+        )
+        logger.warning(
+            "Некорректный личный номер %s от @%s", personal_number, message.from_user.username
+        )
+        try:
+            await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
+        except TelegramBadRequest as e:
+            logger.error(
+                "Ошибка удаления сообщения с некорректным личным номером для @%s: %s",
+                message.from_user.username,
+                str(e),
+            )
+        return
     db_pool = data.get("db_pool")
     if not db_pool:
         logger.error("db_pool отсутствует в data")
@@ -706,6 +953,17 @@ async def process_personal_number(
 @router.message(StateFilter(AdminResponse.exam_military_unit))
 async def process_exam_military_unit(message: Message, state: FSMContext):
     military_unit = message.text.strip()
+    if not is_valid_military_unit(military_unit):
+        await message.answer(
+            "Некорректный формат военной части. Используйте буквы, цифры, символы '/' и '-'. Попробуйте снова:",
+            reply_markup=_exam_back_markup(),
+        )
+        logger.warning(
+            "Некорректная военная часть %s от @%s",
+            military_unit,
+            message.from_user.username,
+        )
+        return
     await state.update_data(military_unit=military_unit)
     await message.answer(
         "Введите подразделение:",
@@ -724,6 +982,17 @@ async def process_exam_military_unit(message: Message, state: FSMContext):
 @router.message(StateFilter(AdminResponse.exam_subdivision))
 async def process_exam_subdivision(message: Message, state: FSMContext):
     subdivision = message.text.strip()
+    if not is_valid_subdivision(subdivision):
+        await message.answer(
+            "Некорректный формат подразделения. Используйте буквы и цифры. Попробуйте снова:",
+            reply_markup=_exam_back_markup(),
+        )
+        logger.warning(
+            "Некорректное подразделение %s от @%s",
+            subdivision,
+            message.from_user.username,
+        )
+        return
     await state.update_data(subdivision=subdivision)
     await message.answer(
         "Введите позывной:",
@@ -742,6 +1011,17 @@ async def process_exam_subdivision(message: Message, state: FSMContext):
 @router.message(StateFilter(AdminResponse.exam_callsign))
 async def process_exam_callsign(message: Message, state: FSMContext):
     callsign = message.text.strip()
+    if not is_valid_callsign(callsign):
+        await message.answer(
+            "Некорректный формат позывного. Используйте буквы и цифры. Попробуйте снова:",
+            reply_markup=_exam_back_markup(),
+        )
+        logger.warning(
+            "Некорректный позывной %s от @%s",
+            callsign,
+            message.from_user.username,
+        )
+        return
     await state.update_data(callsign=callsign)
     await message.answer(
         "Введите направление:",

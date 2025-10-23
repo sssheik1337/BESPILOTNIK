@@ -62,6 +62,11 @@ def get_exam_menu():
             [InlineKeyboardButton(text="Принять экзамен", callback_data="take_exam")],
             [
                 InlineKeyboardButton(
+                    text="Удалить экзамен", callback_data="delete_exam"
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="Выгрузка экзаменов", callback_data="export_exams"
                 )
             ],
