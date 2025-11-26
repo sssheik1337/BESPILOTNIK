@@ -21,6 +21,7 @@ from config import (
     MANUALS_STORAGE_DIR,
 )
 from handlers.admin.admin_panel import download_from_local_api, _cleanup_source_file
+from utils.video import compress_video
 import logging
 
 router = Router()
@@ -117,7 +118,7 @@ async def prompt_manual_upload(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.message(ManualUpload.waiting_for_file, F.document)
+@router.message(ManualUpload.waiting_for_file, F.document | F.photo | F.video)
 async def receive_manual_file(message: Message, state: FSMContext):
     data = await state.get_data()
     category = data.get("category")
@@ -137,23 +138,94 @@ async def receive_manual_file(message: Message, state: FSMContext):
     manuals_dir.mkdir(parents=True, exist_ok=True)
 
     download_result = None
+    progress_message = None
+    media_kind = None
+
     try:
+        file_id = None
+        original_name = None
+        if message.document:
+            media_kind = "document"
+            file_id = message.document.file_id
+            original_name = message.document.file_name or f"{category}.dat"
+        elif message.photo:
+            media_kind = "photo"
+            largest_photo = message.photo[-1]
+            file_id = largest_photo.file_id
+            original_name = f"{category}.jpg"
+        elif message.video:
+            media_kind = "video"
+            file_id = message.video.file_id
+            original_name = message.video.file_name or f"{category}.mp4"
+
+        if not file_id or not original_name:
+            await message.answer(
+                "Пожалуйста, отправьте документ, фото или видео.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="⬅️ Назад", callback_data="manage_manuals"
+                            )
+                        ]
+                    ]
+                ),
+            )
+            return
+
         download_result = await download_from_local_api(
-            file_id=message.document.file_id,
+            file_id=file_id,
             token=TOKEN,
             base_dir=str(Path(LOCAL_BOT_API_CACHE_DIR) / "manuals"),
         )
 
         source_path = Path(download_result.local_path)
-        original_name = message.document.file_name or f"{category}.dat"
+        processed_path = source_path
+
+        if media_kind == "video":
+            progress_message = await message.answer(
+                "Видео получено. Выполняется сжатие, это может занять несколько минут..."
+            )
+            try:
+                compressed_path = await compress_video(source_path)
+                processed_path = Path(compressed_path)
+                if progress_message:
+                    try:
+                        if processed_path == source_path:
+                            await progress_message.edit_text(
+                                "Сжатие не потребовалось, используем исходный файл."
+                            )
+                        else:
+                            await progress_message.edit_text("Сжатие завершено ✅")
+                    except TelegramBadRequest:
+                        pass
+            except Exception as exc:
+                logger.error(
+                    "Не удалось сжать видео руководства %s: %s", category, exc
+                )
+                if progress_message:
+                    try:
+                        await progress_message.edit_text(
+                            "Не удалось сжать видео, используем исходный файл."
+                        )
+                    except TelegramBadRequest:
+                        pass
+                processed_path = source_path
+
         sanitized_name = _sanitize_manual_filename(category, original_name)
+        if media_kind == "video":
+            suffix = processed_path.suffix or Path(sanitized_name).suffix
+            sanitized_name = f"{Path(sanitized_name).stem}{suffix}"
         target_path = manuals_dir / sanitized_name
 
         if target_path.exists():
             target_path.unlink()
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        source_path.replace(target_path)
+        processed_path.replace(target_path)
+
+        if media_kind == "video" and source_path.exists():
+            await _cleanup_source_file(source_path)
 
         previous_file = await set_manual_file(category, target_path.name)
         if previous_file and previous_file != target_path.name:
@@ -183,12 +255,17 @@ async def receive_manual_file(message: Message, state: FSMContext):
     finally:
         if download_result:
             await _cleanup_source_file(download_result.source_path)
+        if progress_message:
+            try:
+                await progress_message.delete()
+            except TelegramBadRequest:
+                pass
 
 
 @router.message(ManualUpload.waiting_for_file)
 async def invalid_manual_file(message: Message):
     await message.answer(
-        "Пожалуйста, отправьте файл.",
+        "Пожалуйста, отправьте документ, фото или видео.",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_manuals")]

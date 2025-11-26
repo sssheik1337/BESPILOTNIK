@@ -199,6 +199,21 @@ async def create_tables():
             )
         """)
         await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS visits (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                finished_at TIMESTAMPTZ DEFAULT NULL,
+                admin_tg_id BIGINT,
+                subdivision TEXT,
+                callsigns TEXT,
+                tasks TEXT,
+                media_type TEXT,
+                media_path TEXT
+            )
+            """
+        )
+        await conn.execute(
             "ALTER TABLE manuals ADD COLUMN IF NOT EXISTS file_name TEXT"
         )
     logger.info("Таблицы базы данных созданы или проверены")
@@ -920,6 +935,119 @@ async def get_defect_reports(serial=None, serial_from=None, serial_to=None):
             )
         logger.info(f"Запрошены отчёты о неисправности, найдено: {len(reports)}")
         return reports
+
+
+async def add_visit(
+    pool,
+    admin_tg_id: int,
+    subdivision: str,
+    callsigns: str,
+    tasks: str,
+    media_type: str | None,
+    media_path: str | None,
+) -> int:
+    async with pool.acquire() as conn:
+        visit_id = await conn.fetchval(
+            """
+            INSERT INTO visits (
+                admin_tg_id,
+                subdivision,
+                callsigns,
+                tasks,
+                media_type,
+                media_path
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id
+            """,
+            admin_tg_id,
+            subdivision,
+            callsigns,
+            tasks,
+            media_type,
+            media_path,
+        )
+        logger.info(
+            "Добавлен визит ID %s для администратора/сотрудника %s (подразделение: %s)",
+            visit_id,
+            admin_tg_id,
+            subdivision,
+        )
+        return visit_id
+
+
+async def finish_visit(pool, visit_id: int) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE visits SET finished_at = NOW() WHERE id = $1",
+            visit_id,
+        )
+        logger.info("Визит ID %s завершён", visit_id)
+
+
+async def get_visits(
+    pool,
+    *,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    admin_tg_id: int | None = None,
+) -> list[asyncpg.Record]:
+    conditions = []
+    params = []
+
+    if date_from:
+        conditions.append(f"created_at >= ${len(params) + 1}")
+        params.append(date_from)
+    if date_to:
+        conditions.append(f"created_at <= ${len(params) + 1}")
+        params.append(date_to)
+    if admin_tg_id is not None:
+        conditions.append(f"admin_tg_id = ${len(params) + 1}")
+        params.append(admin_tg_id)
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    async with pool.acquire() as conn:
+        visits = await conn.fetch(
+            f"""
+            SELECT *
+            FROM visits
+            {where_clause}
+            ORDER BY created_at DESC
+            """,
+            *params,
+        )
+        logger.info(
+            "Запрошены визиты (фильтры: дата с %s по %s, админ %s), найдено: %d",
+            date_from,
+            date_to,
+            admin_tg_id,
+            len(visits),
+        )
+        return visits
+
+
+async def get_visits_for_export(
+    pool, date_from: datetime, date_to: datetime
+) -> list[asyncpg.Record]:
+    async with pool.acquire() as conn:
+        visits = await conn.fetch(
+            """
+            SELECT *
+            FROM visits
+            WHERE created_at BETWEEN $1 AND $2
+            ORDER BY created_at
+            """,
+            date_from,
+            date_to,
+        )
+        logger.info(
+            "Запрошены визиты для экспорта за период %s - %s, найдено: %d",
+            date_from,
+            date_to,
+            len(visits),
+        )
+        return visits
 
 
 async def set_manual_file(category, file_name):

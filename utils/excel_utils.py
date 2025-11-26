@@ -2,6 +2,7 @@ import pandas as pd
 import re
 from io import BytesIO
 from datetime import datetime
+from pathlib import Path
 import logging
 from zipfile import BadZipFile
 
@@ -148,4 +149,36 @@ async def export_serials(db_pool):
         return output
     except Exception as e:
         logger.error(f"Ошибка при экспорте серийных номеров: {str(e)}")
+        return None
+
+
+async def export_visits_to_excel(visits: list, file_path: Path) -> Path:
+    """
+    Экспортирует визиты сотрудников в Excel-файл по переданному пути.
+    """
+
+    try:
+        data = []
+        for visit in visits:
+            data.append(
+                {
+                    "Дата/время начала визита": visit.get("created_at"),
+                    "Дата/время окончания визита": visit.get("finished_at"),
+                    "Telegram-ID администратора": visit.get("admin_tg_id"),
+                    "Подразделение": visit.get("subdivision"),
+                    "Позывные": visit.get("callsigns"),
+                    "Задачи": visit.get("tasks"),
+                    "Тип медиа": visit.get("media_type"),
+                    "Путь к медиа": visit.get("media_path"),
+                }
+            )
+
+        df = pd.DataFrame(data)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_excel(file_path, index=False)
+
+        logger.info(f"Файл экспорта визитов успешно создан: {file_path}")
+        return file_path
+    except Exception as e:
+        logger.error(f"Ошибка при экспорте визитов: {str(e)}")
         return None

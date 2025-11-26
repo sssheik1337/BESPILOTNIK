@@ -105,6 +105,9 @@ def get_admin_menu(user_id):
             )
         ]
     )
+    keyboard.append(
+        [InlineKeyboardButton(text="📋 Учёт визитов", callback_data="manage_visits")]
+    )
     if user_id in MAIN_ADMIN_IDS:
         keyboard.extend(
             [
@@ -362,6 +365,21 @@ def get_base_management_menu():
             [
                 InlineKeyboardButton(
                     text="📝 Выгрузка отчётов", callback_data="export_defect_reports"
+                )
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")],
+        ]
+    )
+
+
+def get_visits_menu():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Начать визит", callback_data="visit_start")],
+            [
+                InlineKeyboardButton(
+                    text="📤 Выгрузить визиты (Excel)",
+                    callback_data="visit_export",
                 )
             ],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")],

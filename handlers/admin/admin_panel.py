@@ -23,6 +23,7 @@ from keyboards.inline import (
     get_my_appeals_menu,
     get_exam_menu,
     get_training_centers_menu,
+    get_visits_menu,
 )
 from database.db import (
     add_admin,
@@ -44,6 +45,8 @@ from database.db import (
     add_training_center,
     get_exam_records_by_personal_number,
     search_exam_records,
+    add_visit,
+    get_visits_for_export,
 )
 from config import (
     MAIN_ADMIN_IDS,
@@ -56,8 +59,10 @@ from config import (
     EXAM_VIDEOS_DIR,
     EXAM_PHOTOS_DIR,
     DEFECT_MEDIA_DIR,
+    VISITS_MEDIA_DIR,
+    PUBLIC_MEDIA_ROOT,
 )
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from aiogram.exceptions import TelegramBadRequest
 from io import BytesIO
@@ -73,6 +78,7 @@ from utils.validators import (
 from utils.statuses import APPEAL_STATUSES
 from utils.video import compress_video
 from utils.storage import build_public_url
+from utils.excel_utils import export_visits_to_excel
 import aiohttp
 from aiohttp import ClientError
 import shutil
@@ -125,6 +131,13 @@ class AdminResponse(StatesGroup):
     add_training_center_name = State()
     add_training_center_link = State()
     edit_training_center_link = State()
+
+
+class VisitState(StatesGroup):
+    subdivision = State()
+    callsigns = State()
+    tasks = State()
+    media = State()
 
 
 COLON_VARIANTS = (":", "\uf03a", "\uff1a", "\ufe55", "\ufe13", "\u2236")
@@ -196,6 +209,24 @@ def _ensure_unique_media_path(directory: Path, base_name: str, suffix: str) -> P
         candidate = directory / f"{base_name}_{counter}{suffix}"
         counter += 1
     return candidate
+
+
+def _visit_media_basename(subdivision: str, callsigns: str, admin_id: int) -> str:
+    subdivision_component = _sanitize_filename_component(subdivision or "visit")
+    callsigns_component = _sanitize_filename_component(callsigns or "calls")
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    return "_".join(
+        part for part in [subdivision_component, callsigns_component, str(admin_id), timestamp] if part
+    )
+
+
+def _relative_media_path(target: Path) -> str:
+    public_root = Path(PUBLIC_MEDIA_ROOT).resolve()
+    target_path = target.resolve()
+    try:
+        return str(target_path.relative_to(public_root))
+    except ValueError:
+        return str(target)
 
 
 def _defect_media_directory(media_type: str) -> Path:
@@ -497,6 +528,342 @@ async def admin_panel_prompt(callback: CallbackQuery, **data):
     logger.debug(
         f"Администратор @{callback.from_user.username} (ID: {callback.from_user.id}) открыл панель администратора"
     )
+
+
+@router.callback_query(F.data == "manage_visits")
+async def manage_visits_menu(callback: CallbackQuery, **data):
+    if callback.from_user.id not in MAIN_ADMIN_IDS:
+        await callback.message.edit_text(
+            "Доступ запрещён.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+                ]
+            ),
+        )
+        logger.warning(
+            "Попытка открытия меню визитов от неадминистратора @%s", callback.from_user.username
+        )
+        return
+    await callback.message.edit_text("Учёт визитов:", reply_markup=get_visits_menu())
+    await callback.answer()
+    logger.debug(
+        "Администратор @%s (ID: %s) открыл меню учёта визитов",
+        callback.from_user.username,
+        callback.from_user.id,
+    )
+
+
+@router.callback_query(F.data == "visit_start")
+async def visit_start(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in MAIN_ADMIN_IDS:
+        await callback.message.edit_text(
+            "Доступ запрещён.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+                ]
+            ),
+        )
+        logger.warning(
+            "Попытка начала визита от неадминистратора @%s", callback.from_user.username
+        )
+        return
+    await state.set_state(VisitState.subdivision)
+    await callback.message.edit_text(
+        "Введите номер подразделения:",
+        reply_markup=_single_back_keyboard("manage_visits"),
+    )
+    await callback.answer()
+    logger.info(
+        "Администратор @%s (ID: %s) начал фиксацию визита",
+        callback.from_user.username,
+        callback.from_user.id,
+    )
+
+
+@router.message(StateFilter(VisitState.subdivision))
+async def visit_subdivision_handler(message: Message, state: FSMContext):
+    subdivision = (message.text or "").strip()
+    if not subdivision:
+        await message.answer(
+            "Введите номер подразделения:", reply_markup=_single_back_keyboard("manage_visits")
+        )
+        return
+    await state.update_data(subdivision=subdivision)
+    await state.set_state(VisitState.callsigns)
+    await message.answer(
+        "Введите позывные, с которыми вы работали:",
+        reply_markup=_single_back_keyboard("manage_visits"),
+    )
+    logger.debug(
+        "Подразделение '%s' сохранено для визита от @%s",
+        subdivision,
+        message.from_user.username,
+    )
+
+
+@router.message(StateFilter(VisitState.callsigns))
+async def visit_callsigns_handler(message: Message, state: FSMContext):
+    callsigns = (message.text or "").strip()
+    if not callsigns:
+        await message.answer(
+            "Введите позывные, с которыми вы работали:",
+            reply_markup=_single_back_keyboard("manage_visits"),
+        )
+        return
+    await state.update_data(callsigns=callsigns)
+    await state.set_state(VisitState.tasks)
+    await message.answer(
+        "Опишите выполненные задачи:",
+        reply_markup=_single_back_keyboard("manage_visits"),
+    )
+    logger.debug(
+        "Позывные '%s' сохранены для визита от @%s",
+        callsigns,
+        message.from_user.username,
+    )
+
+
+@router.message(StateFilter(VisitState.tasks))
+async def visit_tasks_handler(message: Message, state: FSMContext):
+    tasks = (message.text or "").strip()
+    if not tasks:
+        await message.answer(
+            "Опишите выполненные задачи:",
+            reply_markup=_single_back_keyboard("manage_visits"),
+        )
+        return
+    await state.update_data(tasks=tasks)
+    await state.set_state(VisitState.media)
+    await message.answer(
+        "Пришлите фото или видео выполненной работы. Если медиа нет, напишите 'нет'.",
+        reply_markup=_single_back_keyboard("manage_visits"),
+    )
+    logger.debug(
+        "Задачи для визита сохранены от @%s: %s",
+        message.from_user.username,
+        tasks,
+    )
+
+
+@router.message(StateFilter(VisitState.media))
+async def visit_media_handler(message: Message, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при сохранении визита")
+        await message.answer(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=_single_back_keyboard("manage_visits"),
+        )
+        await state.clear()
+        return
+
+    state_data = await state.get_data()
+    subdivision = state_data.get("subdivision", "")
+    callsigns = state_data.get("callsigns", "")
+    tasks = state_data.get("tasks", "")
+    media_type = "none"
+    media_path = None
+    download_result: Optional[DownloadResult] = None
+    progress_message: Optional[Message] = None
+
+    try:
+        if message.photo:
+            largest_photo = message.photo[-1]
+            cache_dir = Path(LOCAL_BOT_API_CACHE_DIR) / "visits"
+            download_result = await download_from_local_api(
+                file_id=largest_photo.file_id,
+                token=TOKEN,
+                base_dir=str(cache_dir),
+            )
+            source_path = Path(download_result.local_path)
+            suffix = source_path.suffix or ".jpg"
+            base_name = _visit_media_basename(subdivision, callsigns, message.from_user.id)
+            final_path = _ensure_unique_media_path(
+                Path(VISITS_MEDIA_DIR) / "photos", base_name, suffix
+            )
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.replace(final_path)
+            media_type = "photo"
+            media_path = _relative_media_path(final_path)
+            logger.debug(
+                "Фото визита сохранено от @%s: %s",
+                message.from_user.username,
+                media_path,
+            )
+        elif message.video or message.video_note:
+            video_obj = message.video or message.video_note
+            if getattr(video_obj, "file_size", 0) and video_obj.file_size > 2_000_000_000:
+                await message.answer(
+                    "Видео слишком большое (максимум 2 ГБ).",
+                    reply_markup=_single_back_keyboard("manage_visits"),
+                )
+                logger.warning(
+                    "Слишком большой видеофайл визита от @%s: %s байт",
+                    message.from_user.username,
+                    video_obj.file_size,
+                )
+                await state.clear()
+                return
+            cache_dir = Path(LOCAL_BOT_API_CACHE_DIR) / "visits"
+            download_result = await download_from_local_api(
+                file_id=video_obj.file_id,
+                token=TOKEN,
+                base_dir=str(cache_dir),
+            )
+            progress_message = await message.answer(
+                "Видео получено. Выполняется сжатие, это может занять несколько минут..."
+            )
+            compressed_path = await compress_video(download_result.local_path)
+            try:
+                if progress_message:
+                    await progress_message.edit_text("Сжатие завершено ✅")
+            except TelegramBadRequest:
+                pass
+            compressed_file = Path(compressed_path)
+            suffix = compressed_file.suffix or ".mp4"
+            base_name = _visit_media_basename(subdivision, callsigns, message.from_user.id)
+            final_path = _ensure_unique_media_path(
+                Path(VISITS_MEDIA_DIR) / "videos", base_name, suffix
+            )
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            compressed_file.replace(final_path)
+            media_type = "video"
+            media_path = _relative_media_path(final_path)
+            logger.debug(
+                "Видео визита сохранено от @%s: %s",
+                message.from_user.username,
+                media_path,
+            )
+        else:
+            text_value = (message.text or "").strip().lower()
+            if text_value in {"нет", "без медиа", "нет медиа", "нету"}:
+                media_type = "none"
+                media_path = None
+                logger.debug("Визит без медиа от @%s", message.from_user.username)
+            else:
+                await message.answer(
+                    "Пришлите фото или видео выполненной работы. Если медиа нет, напишите 'нет'.",
+                    reply_markup=_single_back_keyboard("manage_visits"),
+                )
+                return
+
+        visit_id = await add_visit(
+            db_pool,
+            admin_tg_id=message.from_user.id,
+            subdivision=subdivision,
+            callsigns=callsigns,
+            tasks=tasks,
+            media_type=media_type,
+            media_path=media_path,
+        )
+        await state.clear()
+        summary_lines = [
+            f"Визит №{visit_id} зафиксирован.",
+            f"Подразделение: {subdivision}",
+            f"Позывные: {callsigns}",
+            f"Задачи: {tasks}",
+        ]
+        if media_type != "none":
+            summary_lines.append(f"Медиа: {media_type}")
+            if media_path:
+                summary_lines.append(
+                    f"Ссылка: {build_public_url(Path(PUBLIC_MEDIA_ROOT) / media_path)}"
+                )
+        else:
+            summary_lines.append("Медиа: отсутствует")
+        await message.answer(
+            "\n".join(summary_lines), reply_markup=get_visits_menu()
+        )
+        logger.info(
+            "Визит ID %s записан администратором @%s", visit_id, message.from_user.username
+        )
+    except LocalBotAPIConfigurationError as config_error:
+        logger.error(
+            "Ошибка конфигурации локального Bot API при сохранении визита: %s",
+            config_error,
+        )
+        await message.answer(
+            "Локальный Bot API работает в режиме --local, но путь к данным не настроен. "
+            "Укажите LOCAL_BOT_API_DATA_DIR и примонтируйте каталог перед повторной загрузкой.",
+            reply_markup=_single_back_keyboard("manage_visits"),
+        )
+        await state.clear()
+    except Exception as exc:
+        logger.exception("Не удалось сохранить визит: %s", exc)
+        await message.answer(
+            "Ошибка при сохранении визита. Попробуйте позже.",
+            reply_markup=_single_back_keyboard("manage_visits"),
+        )
+        await state.clear()
+    finally:
+        if progress_message:
+            try:
+                await progress_message.delete()
+            except TelegramBadRequest:
+                pass
+        if download_result:
+            await _cleanup_source_file(download_result.source_path)
+
+
+@router.callback_query(F.data == "visit_export")
+async def visit_export_handler(callback: CallbackQuery, **data):
+    if callback.from_user.id not in MAIN_ADMIN_IDS:
+        await callback.message.edit_text(
+            "Доступ запрещён.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+                ]
+            ),
+        )
+        logger.warning(
+            "Попытка выгрузки визитов от неадминистратора @%s", callback.from_user.username
+        )
+        return
+
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при выгрузке визитов")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.", reply_markup=get_visits_menu()
+        )
+        return
+
+    date_to = datetime.now()
+    date_from = date_to - timedelta(days=30)
+    visits = await get_visits_for_export(db_pool, date_from, date_to)
+    if not visits:
+        await callback.message.edit_text(
+            "Нет визитов за последние 30 дней.", reply_markup=get_visits_menu()
+        )
+        await callback.answer()
+        logger.info(
+            "Запрошена выгрузка визитов за последние 30 дней, данных нет (пользователь @%s)",
+            callback.from_user.username,
+        )
+        return
+
+    export_dir = Path(LOCAL_BOT_API_CACHE_DIR) / "visits_exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    file_path = export_dir / f"visits_{date_to.strftime('%Y%m%d%H%M%S')}.xlsx"
+    await export_visits_to_excel(visits, file_path)
+    await callback.message.answer_document(
+        BufferedInputFile(file_path.read_bytes(), filename=file_path.name),
+        caption="Визиты за последние 30 дней",
+    )
+    await callback.answer()
+    logger.info(
+        "Визиты за период %s - %s выгружены пользователем @%s",
+        date_from,
+        date_to,
+        callback.from_user.username,
+    )
+    try:
+        file_path.unlink()
+    except OSError:
+        pass
 
 
 @router.callback_query(F.data.startswith("select_exam_"))
