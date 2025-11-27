@@ -13,6 +13,8 @@ from aiogram.types import FSInputFile
 from aiogram.exceptions import TelegramBadRequest
 
 from keyboards.inline import (
+    ManualCategoryCallback,
+    ManualFileCallback,
     get_manual_file_actions,
     get_manual_files_menu,
     get_manuals_admin_menu,
@@ -97,7 +99,8 @@ async def _send_category_overview(message_obj, category: str, *, is_admin: bool)
 )
 async def open_manual_category(callback: CallbackQuery, callback_data: dict, state: FSMContext):
     await state.clear()
-    category = callback_data["category"]
+    callback_data = ManualCategoryCallback.model_validate(callback_data)
+    category = callback_data.category
     try:
         await callback.message.delete()
     except TelegramBadRequest:
@@ -138,7 +141,8 @@ async def _prompt_file_upload(callback: CallbackQuery, category: str, state: FSM
     )
 )
 async def prompt_manual_add(callback: CallbackQuery, callback_data: dict, state: FSMContext):
-    category = callback_data["category"]
+    callback_data = ManualCategoryCallback.model_validate(callback_data)
+    category = callback_data.category
     started = await _prompt_file_upload(callback, category, state)
     if started:
         await callback.answer()
@@ -332,8 +336,9 @@ async def invalid_manual_file(message: Message):
 
 @router.callback_query(manual_file_cb.filter(F.action == "open"))
 async def show_manual_file(callback: CallbackQuery, callback_data: dict):
-    category = callback_data["category"]
-    file_id = int(callback_data["file_id"])
+    callback_data = ManualFileCallback.model_validate(callback_data)
+    category = callback_data.category
+    file_id = int(callback_data.file_id)
     record = await get_manual_file_by_id(file_id)
     if not record or record["category"] != category:
         await callback.answer("Файл не найден", show_alert=True)
@@ -356,8 +361,9 @@ async def show_manual_file(callback: CallbackQuery, callback_data: dict):
 
 @router.callback_query(manual_file_cb.filter(F.action == "open_user"))
 async def show_manual_file_user(callback: CallbackQuery, callback_data: dict):
-    category = callback_data["category"]
-    file_id = int(callback_data["file_id"])
+    callback_data = ManualFileCallback.model_validate(callback_data)
+    category = callback_data.category
+    file_id = int(callback_data.file_id)
     record = await get_manual_file_by_id(file_id)
     if not record or record["category"] != category:
         await callback.answer("Файл не найден", show_alert=True)
@@ -379,8 +385,9 @@ async def show_manual_file_user(callback: CallbackQuery, callback_data: dict):
 
 @router.callback_query(manual_file_cb.filter(F.action == "delete_prompt"))
 async def confirm_delete_file(callback: CallbackQuery, callback_data: dict):
-    category = callback_data["category"]
-    file_id = int(callback_data["file_id"])
+    callback_data = ManualFileCallback.model_validate(callback_data)
+    category = callback_data.category
+    file_id = int(callback_data.file_id)
     await callback.message.answer(
         "Удалить выбранный файл?",
         reply_markup=get_manual_delete_confirm(category, file_id),
@@ -390,8 +397,9 @@ async def confirm_delete_file(callback: CallbackQuery, callback_data: dict):
 
 @router.callback_query(manual_file_cb.filter(F.action == "delete"))
 async def delete_file(callback: CallbackQuery, callback_data: dict):
-    category = callback_data["category"]
-    file_id = int(callback_data["file_id"])
+    callback_data = ManualFileCallback.model_validate(callback_data)
+    category = callback_data.category
+    file_id = int(callback_data.file_id)
     record = await get_manual_file_by_id(file_id)
     if record:
         file_path = _absolute_path(record["file_path"])
@@ -406,7 +414,8 @@ async def delete_file(callback: CallbackQuery, callback_data: dict):
     manual_category_cb.filter((F.role == "admin") & (F.action == "delete_all"))
 )
 async def confirm_delete_all(callback: CallbackQuery, callback_data: dict):
-    category = callback_data["category"]
+    callback_data = ManualCategoryCallback.model_validate(callback_data)
+    category = callback_data.category
     await callback.message.answer(
         "Удалить все файлы категории?",
         reply_markup=get_manual_delete_all_confirm(category),
@@ -420,7 +429,8 @@ async def confirm_delete_all(callback: CallbackQuery, callback_data: dict):
     )
 )
 async def delete_all_files(callback: CallbackQuery, callback_data: dict):
-    category = callback_data["category"]
+    callback_data = ManualCategoryCallback.model_validate(callback_data)
+    category = callback_data.category
     files = await get_manual_files(category)
     for record in files:
         file_path = _absolute_path(record["file_path"])

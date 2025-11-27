@@ -14,6 +14,7 @@ from aiogram.fsm.state import State, StatesGroup
 from pathlib import Path
 
 from keyboards.inline import (
+    ManualCategoryCallback,
     get_user_menu,
     get_admin_menu,
     get_manuals_menu,
@@ -430,7 +431,8 @@ async def manuals_menu(callback: CallbackQuery):
     manual_category_cb.filter((F.role == "user") & (F.action == "open"))
 )
 async def send_manual(callback: CallbackQuery, callback_data: dict):
-    category = callback_data.get("category")
+    callback_data = ManualCategoryCallback.model_validate(callback_data)
+    category = callback_data.category
     files = await get_manual_files(category)
     await callback.message.delete()
     if not files:
