@@ -46,6 +46,7 @@ from database.db import (
     get_exam_records_by_personal_number,
     search_exam_records,
     add_visit,
+    finish_visit,
     get_visits_for_export,
 )
 from config import (
@@ -62,7 +63,7 @@ from config import (
     VISITS_MEDIA_DIR,
     PUBLIC_MEDIA_ROOT,
 )
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 from aiogram.exceptions import TelegramBadRequest
 from io import BytesIO
@@ -227,6 +228,42 @@ def _relative_media_path(target: Path) -> str:
         return str(target_path.relative_to(public_root))
     except ValueError:
         return str(target)
+
+
+def _visit_media_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="➡️ Пропустить", callback_data="visit_skip")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_visits")],
+        ]
+    )
+
+
+async def _finalize_visit_record(
+    db_pool,
+    state: FSMContext,
+    *,
+    admin_id: int,
+    subdivision: str,
+    callsigns: str,
+    tasks: str,
+    media_type: str,
+    media_path: str | None,
+    username: str | None,
+) -> int:
+    visit_id = await add_visit(
+        db_pool,
+        admin_tg_id=admin_id,
+        subdivision=subdivision,
+        callsigns=callsigns,
+        tasks=tasks,
+        media_type=media_type,
+        media_path=media_path,
+    )
+    await finish_visit(db_pool, visit_id)
+    await state.update_data(visit_id=visit_id)
+    logger.info("Визит ID %s записан администратором @%s", visit_id, username)
+    return visit_id
 
 
 def _defect_media_directory(media_type: str) -> Path:
@@ -637,8 +674,8 @@ async def visit_tasks_handler(message: Message, state: FSMContext):
     await state.update_data(tasks=tasks)
     await state.set_state(VisitState.media)
     await message.answer(
-        "Пришлите фото или видео выполненной работы. Если медиа нет, напишите 'нет'.",
-        reply_markup=_single_back_keyboard("manage_visits"),
+        "Пришлите фото или видео выполненной работы. Если медиа нет, нажмите 'Пропустить' или напишите 'нет'.",
+        reply_markup=_visit_media_keyboard(),
     )
     logger.debug(
         "Задачи для визита сохранены от @%s: %s",
@@ -654,7 +691,7 @@ async def visit_media_handler(message: Message, state: FSMContext, **data):
         logger.error("db_pool отсутствует в data при сохранении визита")
         await message.answer(
             "Ошибка сервера. Попробуйте позже.",
-            reply_markup=_single_back_keyboard("manage_visits"),
+            reply_markup=_visit_media_keyboard(),
         )
         await state.clear()
         return
@@ -744,19 +781,21 @@ async def visit_media_handler(message: Message, state: FSMContext, **data):
                 logger.debug("Визит без медиа от @%s", message.from_user.username)
             else:
                 await message.answer(
-                    "Пришлите фото или видео выполненной работы. Если медиа нет, напишите 'нет'.",
-                    reply_markup=_single_back_keyboard("manage_visits"),
+                    "Пришлите фото или видео выполненной работы. Если медиа нет, нажмите 'Пропустить' или напишите 'нет'.",
+                    reply_markup=_visit_media_keyboard(),
                 )
                 return
 
-        visit_id = await add_visit(
+        visit_id = await _finalize_visit_record(
             db_pool,
-            admin_tg_id=message.from_user.id,
+            state,
+            admin_id=message.from_user.id,
             subdivision=subdivision,
             callsigns=callsigns,
             tasks=tasks,
             media_type=media_type,
             media_path=media_path,
+            username=message.from_user.username,
         )
         await state.clear()
         summary_lines = [
@@ -807,6 +846,43 @@ async def visit_media_handler(message: Message, state: FSMContext, **data):
             await _cleanup_source_file(download_result.source_path)
 
 
+@router.callback_query(F.data == "visit_skip", StateFilter(VisitState.media))
+async def visit_media_skip(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при пропуске медиа визита")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.", reply_markup=get_visits_menu()
+        )
+        await state.clear()
+        return
+
+    state_data = await state.get_data()
+    visit_id = await _finalize_visit_record(
+        db_pool,
+        state,
+        admin_id=callback.from_user.id,
+        subdivision=state_data.get("subdivision", ""),
+        callsigns=state_data.get("callsigns", ""),
+        tasks=state_data.get("tasks", ""),
+        media_type="none",
+        media_path=None,
+        username=callback.from_user.username,
+    )
+    await state.clear()
+    summary_lines = [
+        f"Визит №{visit_id} зафиксирован.",
+        f"Подразделение: {state_data.get('subdivision', '')}",
+        f"Позывные: {state_data.get('callsigns', '')}",
+        f"Задачи: {state_data.get('tasks', '')}",
+        "Медиа: отсутствует",
+    ]
+    await callback.message.edit_text(
+        "\n".join(summary_lines), reply_markup=get_visits_menu()
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "visit_export")
 async def visit_export_handler(callback: CallbackQuery, **data):
     if callback.from_user.id not in MAIN_ADMIN_IDS:
@@ -831,33 +907,26 @@ async def visit_export_handler(callback: CallbackQuery, **data):
         )
         return
 
-    date_to = datetime.now()
-    date_from = date_to - timedelta(days=30)
-    visits = await get_visits_for_export(db_pool, date_from, date_to)
+    visits = await get_visits_for_export(db_pool)
     if not visits:
         await callback.message.edit_text(
-            "Нет визитов за последние 30 дней.", reply_markup=get_visits_menu()
+            "Нет визитов для выгрузки.", reply_markup=get_visits_menu()
         )
         await callback.answer()
-        logger.info(
-            "Запрошена выгрузка визитов за последние 30 дней, данных нет (пользователь @%s)",
-            callback.from_user.username,
-        )
+        logger.info("Запрошена выгрузка визитов, данных нет (пользователь @%s)", callback.from_user.username)
         return
 
     export_dir = Path(LOCAL_BOT_API_CACHE_DIR) / "visits_exports"
     export_dir.mkdir(parents=True, exist_ok=True)
-    file_path = export_dir / f"visits_{date_to.strftime('%Y%m%d%H%M%S')}.xlsx"
+    file_path = export_dir / f"visits_{datetime.now().date()}.xlsx"
     await export_visits_to_excel(visits, file_path)
     await callback.message.answer_document(
         BufferedInputFile(file_path.read_bytes(), filename=file_path.name),
-        caption="Визиты за последние 30 дней",
+        caption="Выгрузка всех визитов",
     )
     await callback.answer()
     logger.info(
-        "Визиты за период %s - %s выгружены пользователем @%s",
-        date_from,
-        date_to,
+        "Все визиты выгружены пользователем @%s",
         callback.from_user.username,
     )
     try:

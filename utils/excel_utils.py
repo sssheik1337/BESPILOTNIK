@@ -153,23 +153,31 @@ async def export_serials(db_pool):
 
 
 async def export_visits_to_excel(visits: list, file_path: Path) -> Path:
-    """
-    Экспортирует визиты сотрудников в Excel-файл по переданному пути.
-    """
+    """Экспортирует визиты сотрудников в Excel-файл по переданному пути."""
 
     try:
         data = []
         for visit in visits:
+            created_at = visit.get("created_at")
+            finished_at = visit.get("finished_at")
+            created_at_fmt = (
+                created_at.strftime("%d.%m.%Y %H:%M") if created_at else ""
+            )
+            finished_at_fmt = (
+                finished_at.strftime("%d.%m.%Y %H:%M")
+                if finished_at
+                else "в процессе"
+            )
             data.append(
                 {
-                    "Дата/время начала визита": visit.get("created_at"),
-                    "Дата/время окончания визита": visit.get("finished_at"),
-                    "Telegram-ID администратора": visit.get("admin_tg_id"),
-                    "Подразделение": visit.get("subdivision"),
-                    "Позывные": visit.get("callsigns"),
-                    "Задачи": visit.get("tasks"),
-                    "Тип медиа": visit.get("media_type"),
-                    "Путь к медиа": visit.get("media_path"),
+                    "Дата/время начала визита": created_at_fmt,
+                    "Дата/время окончания визита": finished_at_fmt,
+                    "Telegram-ID администратора": visit.get("admin_tg_id", ""),
+                    "Подразделение": visit.get("subdivision", ""),
+                    "Позывные": visit.get("callsigns", ""),
+                    "Задачи": visit.get("tasks", ""),
+                    "Тип медиа": visit.get("media_type", ""),
+                    "Путь к медиа": visit.get("media_path", ""),
                 }
             )
 
@@ -177,8 +185,8 @@ async def export_visits_to_excel(visits: list, file_path: Path) -> Path:
         file_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_excel(file_path, index=False)
 
-        logger.info(f"Файл экспорта визитов успешно создан: {file_path}")
+        logger.info("Файл экспорта визитов успешно создан: %s", file_path)
         return file_path
     except Exception as e:
-        logger.error(f"Ошибка при экспорте визитов: {str(e)}")
+        logger.error("Ошибка при экспорте визитов: %s", e)
         return None

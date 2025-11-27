@@ -1028,23 +1028,18 @@ async def get_visits(
 
 
 async def get_visits_for_export(
-    pool, date_from: datetime, date_to: datetime
+    pool,
 ) -> list[asyncpg.Record]:
     async with pool.acquire() as conn:
         visits = await conn.fetch(
             """
             SELECT *
             FROM visits
-            WHERE created_at BETWEEN $1 AND $2
-            ORDER BY created_at
+            ORDER BY created_at DESC
             """,
-            date_from,
-            date_to,
         )
         logger.info(
-            "Запрошены визиты для экспорта за период %s - %s, найдено: %d",
-            date_from,
-            date_to,
+            "Запрошены все визиты для экспорта, найдено: %d",
             len(visits),
         )
         return visits

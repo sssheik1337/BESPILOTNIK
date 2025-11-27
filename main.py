@@ -118,31 +118,32 @@ class SerialCheckMiddleware(BaseMiddleware):
 
         logger.debug(f"SerialCheckMiddleware: Текущее состояние FSM: {current_state}")
 
-        is_fsm_state = current_state and (
-            current_state.startswith("UserState:")
-            or current_state.startswith("UserExam:")
-            or current_state.startswith("AppealForm:")
-            or current_state.startswith("AdminResponse:")
-            or current_state.startswith("BaseManagement:")
-            or current_state.startswith("ManualUpload:")
-            or current_state.startswith("VisitState:")
-        )
-        if is_fsm_state:
+        if current_state and current_state.startswith("VisitState:"):
             logger.debug(
-                f"Пропускаем сообщение в состоянии {current_state} для пользователя @{username} (ID: {user_id})"
+                "Передаём сообщение в VisitState без дополнительных проверок для пользователя @%s (ID: %s)",
+                username,
+                user_id,
             )
             return await handler(update, data)
 
         if isinstance(event, Message):
             if event.text and event.text.startswith("/"):
                 logger.debug(
-                    f"Обработка команды '{event.text}' от @{username} (ID: {user_id}) в чате типа {event.chat.type}"
+                    "Обработка команды '%s' от @%s (ID: %s) в чате типа %s",
+                    event.text,
+                    username,
+                    user_id,
+                    event.chat.type,
                 )
-                return await handler(update, data)
-            logger.debug(
-                f"Игнорируем сообщение '{event.text}' от @{username} (ID: {user_id}) в чате типа {event.chat.type}, не является командой"
-            )
-            return
+            else:
+                logger.debug(
+                    "Передаём текстовое сообщение '%s' от @%s (ID: %s) в чате типа %s",
+                    event.text,
+                    username,
+                    user_id,
+                    event.chat.type,
+                )
+            return await handler(update, data)
 
         if isinstance(event, CallbackQuery):
             logger.debug(
