@@ -19,6 +19,8 @@ from keyboards.inline import (
     get_manual_delete_all_confirm,
     get_manual_delete_confirm,
     get_manual_post_upload_actions,
+    manual_category_cb,
+    manual_file_cb,
 )
 from database.db import (
     add_manual_file,
@@ -41,10 +43,10 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 MANUAL_CATEGORIES = {
-    "remote": "Настройка пульта",
-    "erlc": "Прошивка ЕРЛС",
-    "nsu": "Настройка НСУ",
-    "drone": "Руководство по дрону",
+    "remote_settings": "Настройка пульта",
+    "erls_firmware": "Прошивка ЕРЛС",
+    "ncu_setup": "Настройка НСУ",
+    "drone_guide": "Руководство по дрону",
 }
 
 
@@ -90,10 +92,10 @@ async def _send_category_overview(message_obj, category: str, *, is_admin: bool)
     await message_obj.answer(text, reply_markup=reply_markup)
 
 
-@router.callback_query(F.data.startswith("upload_manual_"))
-async def open_manual_category(callback: CallbackQuery, state: FSMContext):
-    category = callback.data.replace("upload_manual_", "")
+@router.callback_query(manual_category_cb.filter(role="admin", action="open"))
+async def open_manual_category(callback: CallbackQuery, callback_data: dict, state: FSMContext):
     await state.clear()
+    category = callback_data["category"]
     try:
         await callback.message.delete()
     except TelegramBadRequest:
@@ -103,40 +105,40 @@ async def open_manual_category(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("manual_add_"))
-async def prompt_manual_add(callback: CallbackQuery, state: FSMContext):
-    category = callback.data.replace("manual_add_", "")
+async def _prompt_file_upload(callback: CallbackQuery, category: str, state: FSMContext):
     files = await get_manual_files(category)
     if len(files) >= 10:
         await callback.answer("Достигнут лимит: максимум 10 файлов", show_alert=True)
-        return
+        return False
     await state.update_data(category=category)
     await state.set_state(ManualUpload.waiting_for_file)
     await callback.message.answer(
         f"Категория: {_category_title(category)}. Отправьте документ, фото или видео.",
         reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"upload_manual_{category}")]]
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="⬅️ Назад",
+                        callback_data=manual_category_cb.new(
+                            role="admin", action="open", category=category
+                        ),
+                    )
+                ]
+            ]
         ),
     )
-    await callback.answer()
+    return True
 
 
-@router.callback_query(F.data.startswith("manual_add_more_"))
-async def manual_add_more(callback: CallbackQuery, state: FSMContext):
-    category = callback.data.replace("manual_add_more_", "")
-    files = await get_manual_files(category)
-    if len(files) >= 10:
-        await callback.answer("Достигнут лимит: максимум 10 файлов", show_alert=True)
-        return
-    await state.update_data(category=category)
-    await state.set_state(ManualUpload.waiting_for_file)
-    await callback.message.answer(
-        f"Категория: {_category_title(category)}. Отправьте документ, фото или видео.",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"upload_manual_{category}")]]
-        ),
-    )
-    await callback.answer()
+@router.callback_query(
+    manual_category_cb.filter(role="admin", action=lambda action: action in {"add", "add_more"})
+)
+async def prompt_manual_add(callback: CallbackQuery, callback_data: dict, state: FSMContext):
+    category = callback_data["category"]
+    started = await _prompt_file_upload(callback, category, state)
+    if started:
+        await callback.answer()
+
 
 
 @router.message(ManualUpload.waiting_for_file, F.document | F.photo | F.video)
@@ -158,7 +160,16 @@ async def receive_manual_file(message: Message, state: FSMContext):
         await message.answer(
             "Достигнут лимит: максимум 10 файлов в категории.",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"upload_manual_{category}")]]
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="⬅️ Назад",
+                            callback_data=manual_category_cb.new(
+                                role="admin", action="open", category=category
+                            ),
+                        )
+                    ]
+                ]
             ),
         )
         await state.clear()
@@ -189,7 +200,16 @@ async def receive_manual_file(message: Message, state: FSMContext):
             await message.answer(
                 "Пожалуйста, отправьте документ, фото или видео.",
                 reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"upload_manual_{category}")]]
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="⬅️ Назад",
+                                callback_data=manual_category_cb.new(
+                                    role="admin", action="open", category=category
+                                ),
+                            )
+                        ]
+                    ]
                 ),
             )
             return
@@ -240,7 +260,16 @@ async def receive_manual_file(message: Message, state: FSMContext):
             await message.answer(
                 "Файл с таким именем уже загружен. Переименуйте файл и отправьте снова.",
                 reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"upload_manual_{category}")]]
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="⬅️ Назад",
+                                callback_data=manual_category_cb.new(
+                                    role="admin", action="open", category=category
+                                ),
+                            )
+                        ]
+                    ]
                 ),
             )
             await state.clear()
@@ -264,7 +293,16 @@ async def receive_manual_file(message: Message, state: FSMContext):
         await message.answer(
             "Не удалось сохранить файл. Проверьте настройки и попробуйте снова.",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"upload_manual_{category}")]]
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="⬅️ Назад",
+                            callback_data=manual_category_cb.new(
+                                role="admin", action="open", category=category
+                            ),
+                        )
+                    ]
+                ]
             ),
         )
         await state.clear()
@@ -288,14 +326,10 @@ async def invalid_manual_file(message: Message):
     )
 
 
-@router.callback_query(F.data.startswith("manual_admin_file_"))
-async def show_manual_file(callback: CallbackQuery):
-    parts = callback.data.split("_")
-    if len(parts) < 5:
-        await callback.answer("Некорректный идентификатор файла", show_alert=True)
-        return
-    _, _, _, category, file_id_str = parts
-    file_id = int(file_id_str)
+@router.callback_query(manual_file_cb.filter(action="open"))
+async def show_manual_file(callback: CallbackQuery, callback_data: dict):
+    category = callback_data["category"]
+    file_id = int(callback_data["file_id"])
     record = await get_manual_file_by_id(file_id)
     if not record or record["category"] != category:
         await callback.answer("Файл не найден", show_alert=True)
@@ -316,14 +350,10 @@ async def show_manual_file(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("manual_user_file_"))
-async def show_manual_file_user(callback: CallbackQuery):
-    parts = callback.data.split("_")
-    if len(parts) < 5:
-        await callback.answer("Некорректный идентификатор файла", show_alert=True)
-        return
-    _, _, _, category, file_id_str = parts
-    file_id = int(file_id_str)
+@router.callback_query(manual_file_cb.filter(action="open_user"))
+async def show_manual_file_user(callback: CallbackQuery, callback_data: dict):
+    category = callback_data["category"]
+    file_id = int(callback_data["file_id"])
     record = await get_manual_file_by_id(file_id)
     if not record or record["category"] != category:
         await callback.answer("Файл не найден", show_alert=True)
@@ -343,25 +373,21 @@ async def show_manual_file_user(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("manual_delete_"))
-async def confirm_delete_file(callback: CallbackQuery):
-    if callback.data.startswith("manual_delete_all_") or callback.data.startswith(
-        "manual_delete_confirm_"
-    ):
-        return
-
-    _, _, category, file_id_str = callback.data.split("_", 3)
+@router.callback_query(manual_file_cb.filter(action="delete_prompt"))
+async def confirm_delete_file(callback: CallbackQuery, callback_data: dict):
+    category = callback_data["category"]
+    file_id = int(callback_data["file_id"])
     await callback.message.answer(
         "Удалить выбранный файл?",
-        reply_markup=get_manual_delete_confirm(category, int(file_id_str)),
+        reply_markup=get_manual_delete_confirm(category, file_id),
     )
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("manual_delete_confirm_"))
-async def delete_file(callback: CallbackQuery):
-    _, _, _, category, file_id_str = callback.data.split("_", 4)
-    file_id = int(file_id_str)
+@router.callback_query(manual_file_cb.filter(action="delete"))
+async def delete_file(callback: CallbackQuery, callback_data: dict):
+    category = callback_data["category"]
+    file_id = int(callback_data["file_id"])
     record = await get_manual_file_by_id(file_id)
     if record:
         file_path = _absolute_path(record["file_path"])
@@ -372,9 +398,9 @@ async def delete_file(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("manual_delete_all_"))
-async def confirm_delete_all(callback: CallbackQuery):
-    category = callback.data.replace("manual_delete_all_", "")
+@router.callback_query(manual_category_cb.filter(role="admin", action="delete_all"))
+async def confirm_delete_all(callback: CallbackQuery, callback_data: dict):
+    category = callback_data["category"]
     await callback.message.answer(
         "Удалить все файлы категории?",
         reply_markup=get_manual_delete_all_confirm(category),
@@ -382,9 +408,9 @@ async def confirm_delete_all(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("manual_delete_all_confirm_"))
-async def delete_all_files(callback: CallbackQuery):
-    category = callback.data.replace("manual_delete_all_confirm_", "")
+@router.callback_query(manual_category_cb.filter(role="admin", action="delete_all_confirm"))
+async def delete_all_files(callback: CallbackQuery, callback_data: dict):
+    category = callback_data["category"]
     files = await get_manual_files(category)
     for record in files:
         file_path = _absolute_path(record["file_path"])

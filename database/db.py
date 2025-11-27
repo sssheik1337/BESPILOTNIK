@@ -1173,7 +1173,7 @@ async def get_manual_files(category: str):
             SELECT id, category, file_name, file_path, uploaded_at
             FROM manuals_files
             WHERE category = $1
-            ORDER BY uploaded_at DESC, id DESC
+            ORDER BY uploaded_at ASC, id ASC
             """,
             category,
         )

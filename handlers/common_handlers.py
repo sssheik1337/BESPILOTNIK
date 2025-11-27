@@ -425,17 +425,9 @@ async def manuals_menu(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(
-    F.data.in_({"manual_remote", "manual_erlc", "manual_nsu", "manual_drone"})
-)
-async def send_manual(callback: CallbackQuery):
-    mapping = {
-        "manual_remote": "remote",
-        "manual_erlc": "erlc",
-        "manual_nsu": "nsu",
-        "manual_drone": "drone",
-    }
-    category = mapping.get(callback.data)
+@router.callback_query(manual_category_cb.filter(role="user", action="open"))
+async def send_manual(callback: CallbackQuery, callback_data: dict):
+    category = callback_data.get("category")
     files = await get_manual_files(category)
     await callback.message.delete()
     if not files:
