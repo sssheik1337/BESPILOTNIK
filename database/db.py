@@ -200,6 +200,17 @@ async def create_tables():
         """)
         await conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS manuals_files (
+                id SERIAL PRIMARY KEY,
+                category TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                uploaded_at TIMESTAMPTZ DEFAULT NOW()
+            )
+            """
+        )
+        await conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS visits (
                 id SERIAL PRIMARY KEY,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -1137,3 +1148,67 @@ async def get_manual_file(category):
             f"Запрошен файл руководства '{category}': {'найден' if has_record else 'отсутствует'}"
         )
         return dict(record) if record else None
+
+
+async def add_manual_file(category: str, file_name: str, file_path: str) -> int:
+    async with pool.acquire() as conn:
+        record = await conn.fetchrow(
+            """
+            INSERT INTO manuals_files (category, file_name, file_path, uploaded_at)
+            VALUES ($1, $2, $3, NOW())
+            RETURNING id
+            """,
+            category,
+            file_name,
+            file_path,
+        )
+        logger.info("Добавлен файл руководства %s (%s)", category, file_name)
+        return record["id"]
+
+
+async def get_manual_files(category: str):
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, category, file_name, file_path, uploaded_at
+            FROM manuals_files
+            WHERE category = $1
+            ORDER BY uploaded_at DESC, id DESC
+            """,
+            category,
+        )
+        logger.debug(
+            "Запрошен список файлов руководства %s: %s шт.", category, len(rows)
+        )
+        return rows
+
+
+async def get_manual_file_by_id(file_id: int):
+    async with pool.acquire() as conn:
+        record = await conn.fetchrow(
+            """
+            SELECT id, category, file_name, file_path, uploaded_at
+            FROM manuals_files
+            WHERE id = $1
+            """,
+            file_id,
+        )
+        if record:
+            logger.debug(
+                "Найден файл руководства id=%s (%s)", file_id, record["file_name"]
+            )
+        else:
+            logger.debug("Файл руководства id=%s не найден", file_id)
+        return record
+
+
+async def delete_manual_file(file_id: int) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM manuals_files WHERE id = $1", file_id)
+        logger.info("Файл руководства id=%s удалён", file_id)
+
+
+async def delete_all_manual_files(category: str) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM manuals_files WHERE category = $1", category)
+        logger.info("Удалены все файлы руководства категории %s", category)

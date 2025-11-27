@@ -56,6 +56,108 @@ def get_manuals_menu():
     return keyboard
 
 
+def get_manual_files_menu(category: str, files, *, is_admin: bool):
+    keyboard = []
+    for manual_file in files:
+        callback = (
+            f"manual_admin_file_{category}_{manual_file['id']}"
+            if is_admin
+            else f"manual_user_file_{category}_{manual_file['id']}"
+        )
+        keyboard.append(
+            [InlineKeyboardButton(text=manual_file["file_name"], callback_data=callback)]
+        )
+
+    control_row = []
+    if is_admin:
+        control_row.append(
+            InlineKeyboardButton(text="➕ Добавить файл", callback_data=f"manual_add_{category}")
+        )
+        control_row.append(
+            InlineKeyboardButton(text="🗑 Удалить все", callback_data=f"manual_delete_all_{category}")
+        )
+        if control_row:
+            keyboard.append(control_row)
+
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data="manage_manuals" if is_admin else "manuals",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_manual_file_actions(category: str, file_id: int, *, is_admin: bool):
+    actions = []
+    if is_admin:
+        actions.append(
+            InlineKeyboardButton(
+                text="Удалить файл", callback_data=f"manual_delete_{category}_{file_id}"
+            )
+        )
+    actions.append(
+        InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=f"upload_manual_{category}" if is_admin else "manuals",
+        )
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[actions])
+
+
+def get_manual_delete_confirm(category: str, file_id: int):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Удалить", callback_data=f"manual_delete_confirm_{category}_{file_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Отмена", callback_data=f"upload_manual_{category}"
+                )
+            ],
+        ]
+    )
+
+
+def get_manual_delete_all_confirm(category: str):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Удалить все", callback_data=f"manual_delete_all_confirm_{category}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Отмена", callback_data=f"upload_manual_{category}"
+                )
+            ],
+        ]
+    )
+
+
+def get_manual_post_upload_actions(category: str):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Добавить ещё", callback_data=f"manual_add_more_{category}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Сохранить", callback_data=f"upload_manual_{category}"
+                )
+            ],
+        ]
+    )
+
+
 def get_exam_menu():
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[

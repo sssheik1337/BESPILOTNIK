@@ -13,14 +13,19 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from pathlib import Path
 
-from keyboards.inline import get_user_menu, get_admin_menu, get_manuals_menu
-from config import MAIN_ADMIN_IDS, MANUALS_STORAGE_DIR
+from keyboards.inline import (
+    get_user_menu,
+    get_admin_menu,
+    get_manuals_menu,
+    get_manual_files_menu,
+)
+from config import MAIN_ADMIN_IDS
 from utils.storage import public_root
 import logging
 import traceback
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from utils.validators import validate_serial
-from database.db import get_serial_history, get_manual_file
+from database.db import get_serial_history, get_manual_files
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -429,37 +434,20 @@ async def send_manual(callback: CallbackQuery):
         "manual_drone": "drone",
     }
     category = mapping.get(callback.data)
-    manual_entry = await get_manual_file(category)
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="manuals")]
-        ]
-    )
+    files = await get_manual_files(category)
     await callback.message.delete()
-    if manual_entry:
-        file_name = manual_entry.get("file_name") if isinstance(manual_entry, dict) else None
-        file_id = manual_entry.get("file_id") if isinstance(manual_entry, dict) else None
-        if file_name:
-            file_path = Path(MANUALS_STORAGE_DIR) / file_name
-            if file_path.exists():
-                await callback.message.answer_document(
-                    FSInputFile(file_path), reply_markup=keyboard
-                )
-            else:
-                logger.warning(
-                    "Файл руководства %s (%s) не найден на диске",
-                    category,
-                    file_name,
-                )
-                await callback.message.answer(
-                    "Файл отсутствует на сервере.", reply_markup=keyboard
-                )
-        elif file_id:
-            await callback.message.answer_document(file_id, reply_markup=keyboard)
-        else:
-            await callback.message.answer("Файл отсутствует.", reply_markup=keyboard)
+    if not files:
+        await callback.message.answer(
+            "Файлы отсутствуют.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manuals")]]
+            ),
+        )
     else:
-        await callback.message.answer("Файл отсутствует.", reply_markup=keyboard)
+        await callback.message.answer(
+            "Выберите файл руководства:",
+            reply_markup=get_manual_files_menu(category, files, is_admin=False),
+        )
     await callback.answer()
 
 

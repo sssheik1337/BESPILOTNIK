@@ -7,18 +7,31 @@ from aiogram.types import (
 )
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
-import re
 from pathlib import Path
 
 from aiogram.types import FSInputFile
 from aiogram.exceptions import TelegramBadRequest
 
-from keyboards.inline import get_manuals_admin_menu
-from database.db import get_manual_file, set_manual_file
+from keyboards.inline import (
+    get_manual_file_actions,
+    get_manual_files_menu,
+    get_manuals_admin_menu,
+    get_manual_delete_all_confirm,
+    get_manual_delete_confirm,
+    get_manual_post_upload_actions,
+)
+from database.db import (
+    add_manual_file,
+    delete_all_manual_files,
+    delete_manual_file,
+    get_manual_file_by_id,
+    get_manual_files,
+)
 from config import (
     TOKEN,
     LOCAL_BOT_API_CACHE_DIR,
     MANUALS_STORAGE_DIR,
+    PUBLIC_MEDIA_ROOT,
 )
 from handlers.admin.admin_panel import download_from_local_api, _cleanup_source_file
 from utils.video import compress_video
@@ -27,28 +40,16 @@ import logging
 router = Router()
 logger = logging.getLogger(__name__)
 
+MANUAL_CATEGORIES = {
+    "remote": "Настройка пульта",
+    "erlc": "Прошивка ЕРЛС",
+    "nsu": "Настройка НСУ",
+    "drone": "Руководство по дрону",
+}
+
 
 class ManualUpload(StatesGroup):
     waiting_for_file = State()
-
-
-def _sanitize_manual_filename(category: str, original: str) -> str:
-    base_name, *ext_parts = original.rsplit(".", 1)
-    extension = f".{ext_parts[0]}" if ext_parts else ""
-    candidates = [base_name, category]
-    cleaned_parts = []
-    for part in candidates:
-        if not part:
-            continue
-        normalized = re.sub(r"[\s]+", "_", part.strip())
-        normalized = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_\-]", "_", normalized)
-        normalized = re.sub(r"_+", "_", normalized).strip("_")
-        if normalized:
-            cleaned_parts.append(normalized)
-    if not cleaned_parts:
-        cleaned_parts.append("manual")
-    filename = "_".join(cleaned_parts)
-    return f"{filename}{extension or '.dat'}"
 
 
 @router.callback_query(F.data == "manage_manuals")
@@ -59,62 +60,82 @@ async def manage_manuals(callback: CallbackQuery, state: FSMContext):
     except TelegramBadRequest:
         pass
     await callback.message.answer(
-        "Выберите руководство для загрузки:", reply_markup=get_manuals_admin_menu()
+        "Выберите категорию руководства:", reply_markup=get_manuals_admin_menu()
     )
     await callback.answer()
 
 
+def _category_dir(category: str) -> Path:
+    return Path(MANUALS_STORAGE_DIR) / category
+
+
+def _absolute_path(file_path: str) -> Path:
+    candidate = Path(file_path)
+    if candidate.is_absolute():
+        return candidate
+    return Path(PUBLIC_MEDIA_ROOT) / candidate
+
+
+def _category_title(category: str) -> str:
+    return MANUAL_CATEGORIES.get(category, category)
+
+
+async def _send_category_overview(message_obj, category: str, *, is_admin: bool):
+    files = await get_manual_files(category)
+    lines = [f"Текущие файлы руководства: {_category_title(category)}"]
+    if not files:
+        lines.append("Файлы отсутствуют.")
+    text = "\n".join(lines)
+    reply_markup = get_manual_files_menu(category, files, is_admin=is_admin)
+    await message_obj.answer(text, reply_markup=reply_markup)
+
+
 @router.callback_query(F.data.startswith("upload_manual_"))
-async def prompt_manual_upload(callback: CallbackQuery, state: FSMContext):
+async def open_manual_category(callback: CallbackQuery, state: FSMContext):
     category = callback.data.replace("upload_manual_", "")
-    await state.update_data(category=category)
-    manuals_dir = Path(MANUALS_STORAGE_DIR)
-    manuals_dir.mkdir(parents=True, exist_ok=True)
-    current_entry = await get_manual_file(category)
-    current_file_name = (
-        current_entry.get("file_name") if current_entry else None
-    )
-    reply_markup = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_manuals")]
-        ]
-    )
-
-    prompt_lines = ["Отправьте файл руководства."]
-    current_path = None
-    if current_file_name:
-        prompt_lines.append(f"Текущая версия: {current_file_name}")
-        candidate = manuals_dir / current_file_name
-        if candidate.exists():
-            current_path = candidate
-    else:
-        prompt_lines.append("Текущая версия отсутствует.")
-
-    prompt_text = "\n".join(prompt_lines)
-
+    await state.clear()
     try:
         await callback.message.delete()
     except TelegramBadRequest:
         pass
+    await state.update_data(category=category)
+    await _send_category_overview(callback.message, category, is_admin=True)
+    await callback.answer()
 
-    if current_path is not None:
-        try:
-            await callback.message.answer_document(
-                FSInputFile(current_path),
-                caption=f"{prompt_text}\n\nТекущая версия руководства во вложении.",
-                reply_markup=reply_markup,
-            )
-        except Exception as exc:  # pragma: no cover - защитное логирование
-            logger.warning(
-                "Не удалось отправить текущее руководство %s: %s",
-                current_file_name,
-                exc,
-            )
-            await callback.message.answer(prompt_text, reply_markup=reply_markup)
-    else:
-        await callback.message.answer(prompt_text, reply_markup=reply_markup)
 
+@router.callback_query(F.data.startswith("manual_add_"))
+async def prompt_manual_add(callback: CallbackQuery, state: FSMContext):
+    category = callback.data.replace("manual_add_", "")
+    files = await get_manual_files(category)
+    if len(files) >= 10:
+        await callback.answer("Достигнут лимит: максимум 10 файлов", show_alert=True)
+        return
+    await state.update_data(category=category)
     await state.set_state(ManualUpload.waiting_for_file)
+    await callback.message.answer(
+        f"Категория: {_category_title(category)}. Отправьте документ, фото или видео.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"upload_manual_{category}")]]
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("manual_add_more_"))
+async def manual_add_more(callback: CallbackQuery, state: FSMContext):
+    category = callback.data.replace("manual_add_more_", "")
+    files = await get_manual_files(category)
+    if len(files) >= 10:
+        await callback.answer("Достигнут лимит: максимум 10 файлов", show_alert=True)
+        return
+    await state.update_data(category=category)
+    await state.set_state(ManualUpload.waiting_for_file)
+    await callback.message.answer(
+        f"Категория: {_category_title(category)}. Отправьте документ, фото или видео.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"upload_manual_{category}")]]
+        ),
+    )
     await callback.answer()
 
 
@@ -126,16 +147,22 @@ async def receive_manual_file(message: Message, state: FSMContext):
         await message.answer(
             "Неизвестная категория руководства. Повторите попытку.",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_manuals")]
-                ]
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_manuals")]]
             ),
         )
         await state.clear()
         return
 
-    manuals_dir = Path(MANUALS_STORAGE_DIR)
-    manuals_dir.mkdir(parents=True, exist_ok=True)
+    files = await get_manual_files(category)
+    if len(files) >= 10:
+        await message.answer(
+            "Достигнут лимит: максимум 10 файлов в категории.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"upload_manual_{category}")]]
+            ),
+        )
+        await state.clear()
+        return
 
     download_result = None
     progress_message = None
@@ -147,28 +174,22 @@ async def receive_manual_file(message: Message, state: FSMContext):
         if message.document:
             media_kind = "document"
             file_id = message.document.file_id
-            original_name = message.document.file_name or f"{category}.dat"
+            original_name = message.document.file_name or "document.bin"
         elif message.photo:
             media_kind = "photo"
             largest_photo = message.photo[-1]
             file_id = largest_photo.file_id
-            original_name = f"{category}.jpg"
+            original_name = f"photo_{file_id}.jpg"
         elif message.video:
             media_kind = "video"
             file_id = message.video.file_id
-            original_name = message.video.file_name or f"{category}.mp4"
+            original_name = message.video.file_name or f"video_{file_id}.mp4"
 
         if not file_id or not original_name:
             await message.answer(
                 "Пожалуйста, отправьте документ, фото или видео.",
                 reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="⬅️ Назад", callback_data="manage_manuals"
-                            )
-                        ]
-                    ]
+                    inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"upload_manual_{category}")]]
                 ),
             )
             return
@@ -182,7 +203,7 @@ async def receive_manual_file(message: Message, state: FSMContext):
         source_path = Path(download_result.local_path)
         processed_path = source_path
 
-        if media_kind == "video":
+        if media_kind == "video" and source_path.stat().st_size > 75 * 1024 * 1024:
             progress_message = await message.answer(
                 "Видео получено. Выполняется сжатие, это может занять несколько минут..."
             )
@@ -200,9 +221,7 @@ async def receive_manual_file(message: Message, state: FSMContext):
                     except TelegramBadRequest:
                         pass
             except Exception as exc:
-                logger.error(
-                    "Не удалось сжать видео руководства %s: %s", category, exc
-                )
+                logger.error("Не удалось сжать видео руководства %s: %s", category, exc)
                 if progress_message:
                     try:
                         await progress_message.edit_text(
@@ -212,33 +231,32 @@ async def receive_manual_file(message: Message, state: FSMContext):
                         pass
                 processed_path = source_path
 
-        sanitized_name = _sanitize_manual_filename(category, original_name)
-        if media_kind == "video":
-            suffix = processed_path.suffix or Path(sanitized_name).suffix
-            sanitized_name = f"{Path(sanitized_name).stem}{suffix}"
-        target_path = manuals_dir / sanitized_name
+        target_dir = _category_dir(category)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = Path(original_name).name
+        target_path = target_dir / safe_name
 
         if target_path.exists():
-            target_path.unlink()
+            await message.answer(
+                "Файл с таким именем уже загружен. Переименуйте файл и отправьте снова.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"upload_manual_{category}")]]
+                ),
+            )
+            await state.clear()
+            return
 
-        target_path.parent.mkdir(parents=True, exist_ok=True)
         processed_path.replace(target_path)
 
         if media_kind == "video" and source_path.exists():
             await _cleanup_source_file(source_path)
 
-        previous_file = await set_manual_file(category, target_path.name)
-        if previous_file and previous_file != target_path.name:
-            old_path = manuals_dir / previous_file
-            old_path.unlink(missing_ok=True)
+        relative_path = Path("manuals") / category / safe_name
+        await add_manual_file(category, safe_name, str(relative_path))
 
         await message.answer(
-            "Файл сохранён.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_manuals")]
-                ]
-            ),
+            "Файл добавлен. Что дальше?",
+            reply_markup=get_manual_post_upload_actions(category),
         )
         await state.clear()
     except Exception as exc:
@@ -246,9 +264,7 @@ async def receive_manual_file(message: Message, state: FSMContext):
         await message.answer(
             "Не удалось сохранить файл. Проверьте настройки и попробуйте снова.",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_manuals")]
-                ]
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"upload_manual_{category}")]]
             ),
         )
         await state.clear()
@@ -267,8 +283,113 @@ async def invalid_manual_file(message: Message):
     await message.answer(
         "Пожалуйста, отправьте документ, фото или видео.",
         reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_manuals")]
-            ]
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_manuals")]]
         ),
     )
+
+
+@router.callback_query(F.data.startswith("manual_admin_file_"))
+async def show_manual_file(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    if len(parts) < 5:
+        await callback.answer("Некорректный идентификатор файла", show_alert=True)
+        return
+    _, _, _, category, file_id_str = parts
+    file_id = int(file_id_str)
+    record = await get_manual_file_by_id(file_id)
+    if not record or record["category"] != category:
+        await callback.answer("Файл не найден", show_alert=True)
+        return
+
+    file_path = _absolute_path(record["file_path"])
+    keyboard = get_manual_file_actions(category, file_id, is_admin=True)
+
+    try:
+        await callback.message.answer_document(
+            FSInputFile(file_path),
+            caption=f"{_category_title(category)} — {record['file_name']}",
+            reply_markup=keyboard,
+        )
+    except Exception as exc:
+        logger.error("Не удалось отправить файл руководства %s: %s", record["file_name"], exc)
+        await callback.message.answer("Не удалось отправить файл.", reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("manual_user_file_"))
+async def show_manual_file_user(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    if len(parts) < 5:
+        await callback.answer("Некорректный идентификатор файла", show_alert=True)
+        return
+    _, _, _, category, file_id_str = parts
+    file_id = int(file_id_str)
+    record = await get_manual_file_by_id(file_id)
+    if not record or record["category"] != category:
+        await callback.answer("Файл не найден", show_alert=True)
+        return
+
+    file_path = _absolute_path(record["file_path"])
+    keyboard = get_manual_file_actions(category, file_id, is_admin=False)
+    try:
+        await callback.message.answer_document(
+            FSInputFile(file_path),
+            caption=record["file_name"],
+            reply_markup=keyboard,
+        )
+    except Exception as exc:
+        logger.error("Не удалось отправить файл руководства %s: %s", record["file_name"], exc)
+        await callback.message.answer("Не удалось отправить файл.", reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("manual_delete_"))
+async def confirm_delete_file(callback: CallbackQuery):
+    if callback.data.startswith("manual_delete_all_") or callback.data.startswith(
+        "manual_delete_confirm_"
+    ):
+        return
+
+    _, _, category, file_id_str = callback.data.split("_", 3)
+    await callback.message.answer(
+        "Удалить выбранный файл?",
+        reply_markup=get_manual_delete_confirm(category, int(file_id_str)),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("manual_delete_confirm_"))
+async def delete_file(callback: CallbackQuery):
+    _, _, _, category, file_id_str = callback.data.split("_", 4)
+    file_id = int(file_id_str)
+    record = await get_manual_file_by_id(file_id)
+    if record:
+        file_path = _absolute_path(record["file_path"])
+        file_path.unlink(missing_ok=True)
+    await delete_manual_file(file_id)
+    await callback.message.answer("Файл удалён.")
+    await _send_category_overview(callback.message, category, is_admin=True)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("manual_delete_all_"))
+async def confirm_delete_all(callback: CallbackQuery):
+    category = callback.data.replace("manual_delete_all_", "")
+    await callback.message.answer(
+        "Удалить все файлы категории?",
+        reply_markup=get_manual_delete_all_confirm(category),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("manual_delete_all_confirm_"))
+async def delete_all_files(callback: CallbackQuery):
+    category = callback.data.replace("manual_delete_all_confirm_", "")
+    files = await get_manual_files(category)
+    for record in files:
+        file_path = _absolute_path(record["file_path"])
+        file_path.unlink(missing_ok=True)
+    await delete_all_manual_files(category)
+    await callback.message.answer("Все файлы удалены.")
+    await _send_category_overview(callback.message, category, is_admin=True)
+    await callback.answer()
