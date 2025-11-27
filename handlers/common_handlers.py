@@ -18,6 +18,7 @@ from keyboards.inline import (
     get_admin_menu,
     get_manuals_menu,
     get_manual_files_menu,
+    manual_category_cb,
 )
 from config import MAIN_ADMIN_IDS
 from utils.storage import public_root
