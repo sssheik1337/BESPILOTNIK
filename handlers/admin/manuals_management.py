@@ -92,7 +92,9 @@ async def _send_category_overview(message_obj, category: str, *, is_admin: bool)
     await message_obj.answer(text, reply_markup=reply_markup)
 
 
-@router.callback_query(manual_category_cb.filter(role="admin", action="open"))
+@router.callback_query(
+    manual_category_cb.filter((F.role == "admin") & (F.action == "open"))
+)
 async def open_manual_category(callback: CallbackQuery, callback_data: dict, state: FSMContext):
     await state.clear()
     category = callback_data["category"]
@@ -131,7 +133,9 @@ async def _prompt_file_upload(callback: CallbackQuery, category: str, state: FSM
 
 
 @router.callback_query(
-    manual_category_cb.filter(role="admin", action=lambda action: action in {"add", "add_more"})
+    manual_category_cb.filter(
+        (F.role == "admin") & (F.action.in_({"add", "add_more"}))
+    )
 )
 async def prompt_manual_add(callback: CallbackQuery, callback_data: dict, state: FSMContext):
     category = callback_data["category"]
@@ -326,7 +330,7 @@ async def invalid_manual_file(message: Message):
     )
 
 
-@router.callback_query(manual_file_cb.filter(action="open"))
+@router.callback_query(manual_file_cb.filter(F.action == "open"))
 async def show_manual_file(callback: CallbackQuery, callback_data: dict):
     category = callback_data["category"]
     file_id = int(callback_data["file_id"])
@@ -350,7 +354,7 @@ async def show_manual_file(callback: CallbackQuery, callback_data: dict):
     await callback.answer()
 
 
-@router.callback_query(manual_file_cb.filter(action="open_user"))
+@router.callback_query(manual_file_cb.filter(F.action == "open_user"))
 async def show_manual_file_user(callback: CallbackQuery, callback_data: dict):
     category = callback_data["category"]
     file_id = int(callback_data["file_id"])
@@ -373,7 +377,7 @@ async def show_manual_file_user(callback: CallbackQuery, callback_data: dict):
     await callback.answer()
 
 
-@router.callback_query(manual_file_cb.filter(action="delete_prompt"))
+@router.callback_query(manual_file_cb.filter(F.action == "delete_prompt"))
 async def confirm_delete_file(callback: CallbackQuery, callback_data: dict):
     category = callback_data["category"]
     file_id = int(callback_data["file_id"])
@@ -384,7 +388,7 @@ async def confirm_delete_file(callback: CallbackQuery, callback_data: dict):
     await callback.answer()
 
 
-@router.callback_query(manual_file_cb.filter(action="delete"))
+@router.callback_query(manual_file_cb.filter(F.action == "delete"))
 async def delete_file(callback: CallbackQuery, callback_data: dict):
     category = callback_data["category"]
     file_id = int(callback_data["file_id"])
@@ -398,7 +402,9 @@ async def delete_file(callback: CallbackQuery, callback_data: dict):
     await callback.answer()
 
 
-@router.callback_query(manual_category_cb.filter(role="admin", action="delete_all"))
+@router.callback_query(
+    manual_category_cb.filter((F.role == "admin") & (F.action == "delete_all"))
+)
 async def confirm_delete_all(callback: CallbackQuery, callback_data: dict):
     category = callback_data["category"]
     await callback.message.answer(
@@ -408,7 +414,11 @@ async def confirm_delete_all(callback: CallbackQuery, callback_data: dict):
     await callback.answer()
 
 
-@router.callback_query(manual_category_cb.filter(role="admin", action="delete_all_confirm"))
+@router.callback_query(
+    manual_category_cb.filter(
+        (F.role == "admin") & (F.action == "delete_all_confirm")
+    )
+)
 async def delete_all_files(callback: CallbackQuery, callback_data: dict):
     category = callback_data["category"]
     files = await get_manual_files(category)

@@ -426,7 +426,9 @@ async def manuals_menu(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(manual_category_cb.filter(role="user", action="open"))
+@router.callback_query(
+    manual_category_cb.filter((F.role == "user") & (F.action == "open"))
+)
 async def send_manual(callback: CallbackQuery, callback_data: dict):
     category = callback_data.get("category")
     files = await get_manual_files(category)
