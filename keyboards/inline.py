@@ -7,8 +7,23 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-manual_category_cb = CallbackData("manualcat", "role", "action", "category")
-manual_file_cb = CallbackData("manual", "action", "category", "file_id")
+
+
+class ManualCategoryCallback(CallbackData, prefix="manualcat"):
+    role: str
+    action: str
+    category: str
+
+
+class ManualFileCallback(CallbackData, prefix="manual"):
+    action: str
+    category: str
+    file_id: int
+
+
+# оставляем прежние имена для совместимости с существующим кодом
+manual_category_cb = ManualCategoryCallback
+manual_file_cb = ManualFileCallback
 
 
 def get_user_menu():
@@ -37,33 +52,33 @@ def get_manuals_menu():
             [
                 InlineKeyboardButton(
                     text="🎮 Настройка пульта",
-                    callback_data=manual_category_cb.new(
+                    callback_data=manual_category_cb(
                         role="user", action="open", category="remote_settings"
-                    ),
+                    ).pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="🧰 Прошивка ЕРЛС",
-                    callback_data=manual_category_cb.new(
+                    callback_data=manual_category_cb(
                         role="user", action="open", category="erls_firmware"
-                    ),
+                    ).pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="🛰 Настройка НСУ",
-                    callback_data=manual_category_cb.new(
+                    callback_data=manual_category_cb(
                         role="user", action="open", category="ncu_setup"
-                    ),
+                    ).pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="📘 Руководство по дрону",
-                    callback_data=manual_category_cb.new(
+                    callback_data=manual_category_cb(
                         role="user", action="open", category="drone_guide"
-                    ),
+                    ).pack(),
                 )
             ],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
@@ -80,11 +95,11 @@ def get_manual_files_menu(category: str, files, *, is_admin: bool):
             [
                 InlineKeyboardButton(
                     text=manual_file["file_name"],
-                    callback_data=manual_file_cb.new(
+                    callback_data=manual_file_cb(
                         action="open" if is_admin else "open_user",
                         category=category,
                         file_id=manual_file["id"],
-                    ),
+                    ).pack(),
                 )
             ]
         )
@@ -93,18 +108,18 @@ def get_manual_files_menu(category: str, files, *, is_admin: bool):
         control_row = [
             InlineKeyboardButton(
                 text="➕ Добавить файл",
-                callback_data=manual_category_cb.new(
+                callback_data=manual_category_cb(
                     role="admin", action="add", category=category
-                ),
+                ).pack(),
             )
         ]
         if files:
             control_row.append(
                 InlineKeyboardButton(
                     text="🗑 Удалить все",
-                    callback_data=manual_category_cb.new(
+                    callback_data=manual_category_cb(
                         role="admin", action="delete_all", category=category
-                    ),
+                    ).pack(),
                 )
             )
         keyboard.append(control_row)
@@ -126,19 +141,19 @@ def get_manual_file_actions(category: str, file_id: int, *, is_admin: bool):
         actions.append(
             InlineKeyboardButton(
                 text="Удалить файл",
-                callback_data=manual_file_cb.new(
+                callback_data=manual_file_cb(
                     action="delete_prompt", category=category, file_id=file_id
-                ),
+                ).pack(),
             )
         )
     actions.append(
         InlineKeyboardButton(
             text="⬅️ Назад",
-            callback_data=manual_category_cb.new(
+            callback_data=manual_category_cb(
                 role="admin" if is_admin else "user",
                 action="open",
                 category=category,
-            ),
+            ).pack(),
         )
     )
     return InlineKeyboardMarkup(inline_keyboard=[actions])
@@ -150,17 +165,17 @@ def get_manual_delete_confirm(category: str, file_id: int):
             [
                 InlineKeyboardButton(
                     text="✅ Удалить",
-                    callback_data=manual_file_cb.new(
+                    callback_data=manual_file_cb(
                         action="delete", category=category, file_id=file_id
-                    ),
+                    ).pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="⬅️ Отмена",
-                    callback_data=manual_file_cb.new(
+                    callback_data=manual_file_cb(
                         action="open", category=category, file_id=file_id
-                    ),
+                    ).pack(),
                 )
             ],
         ]
@@ -173,17 +188,17 @@ def get_manual_delete_all_confirm(category: str):
             [
                 InlineKeyboardButton(
                     text="✅ Удалить все",
-                    callback_data=manual_category_cb.new(
+                    callback_data=manual_category_cb(
                         role="admin", action="delete_all_confirm", category=category
-                    ),
+                    ).pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="⬅️ Отмена",
-                    callback_data=manual_category_cb.new(
+                    callback_data=manual_category_cb(
                         role="admin", action="open", category=category
-                    ),
+                    ).pack(),
                 )
             ],
         ]
@@ -196,17 +211,17 @@ def get_manual_post_upload_actions(category: str):
             [
                 InlineKeyboardButton(
                     text="Добавить ещё",
-                    callback_data=manual_category_cb.new(
+                    callback_data=manual_category_cb(
                         role="admin", action="add_more", category=category
-                    ),
+                    ).pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="Сохранить",
-                    callback_data=manual_category_cb.new(
+                    callback_data=manual_category_cb(
                         role="admin", action="open", category=category
-                    ),
+                    ).pack(),
                 )
             ],
         ]
@@ -702,33 +717,33 @@ def get_manuals_admin_menu():
             [
                 InlineKeyboardButton(
                     text="Настройка пульта",
-                    callback_data=manual_category_cb.new(
+                    callback_data=manual_category_cb(
                         role="admin", action="open", category="remote_settings"
-                    ),
+                    ).pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="Прошивка ЕРЛС",
-                    callback_data=manual_category_cb.new(
+                    callback_data=manual_category_cb(
                         role="admin", action="open", category="erls_firmware"
-                    ),
+                    ).pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="Настройка НСУ",
-                    callback_data=manual_category_cb.new(
+                    callback_data=manual_category_cb(
                         role="admin", action="open", category="ncu_setup"
-                    ),
+                    ).pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="Руководство по дрону",
-                    callback_data=manual_category_cb.new(
+                    callback_data=manual_category_cb(
                         role="admin", action="open", category="drone_guide"
-                    ),
+                    ).pack(),
                 )
             ],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")],

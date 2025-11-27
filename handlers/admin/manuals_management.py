@@ -119,9 +119,9 @@ async def _prompt_file_upload(callback: CallbackQuery, category: str, state: FSM
                 [
                     InlineKeyboardButton(
                         text="⬅️ Назад",
-                        callback_data=manual_category_cb.new(
+                        callback_data=manual_category_cb(
                             role="admin", action="open", category=category
-                        ),
+                        ).pack(),
                     )
                 ]
             ]
@@ -164,9 +164,9 @@ async def receive_manual_file(message: Message, state: FSMContext):
                     [
                         InlineKeyboardButton(
                             text="⬅️ Назад",
-                            callback_data=manual_category_cb.new(
+                            callback_data=manual_category_cb(
                                 role="admin", action="open", category=category
-                            ),
+                            ).pack(),
                         )
                     ]
                 ]
@@ -204,9 +204,9 @@ async def receive_manual_file(message: Message, state: FSMContext):
                         [
                             InlineKeyboardButton(
                                 text="⬅️ Назад",
-                                callback_data=manual_category_cb.new(
+                                callback_data=manual_category_cb(
                                     role="admin", action="open", category=category
-                                ),
+                                ).pack(),
                             )
                         ]
                     ]
@@ -264,9 +264,9 @@ async def receive_manual_file(message: Message, state: FSMContext):
                         [
                             InlineKeyboardButton(
                                 text="⬅️ Назад",
-                                callback_data=manual_category_cb.new(
+                                callback_data=manual_category_cb(
                                     role="admin", action="open", category=category
-                                ),
+                                ).pack(),
                             )
                         ]
                     ]
@@ -297,9 +297,9 @@ async def receive_manual_file(message: Message, state: FSMContext):
                     [
                         InlineKeyboardButton(
                             text="⬅️ Назад",
-                            callback_data=manual_category_cb.new(
+                            callback_data=manual_category_cb(
                                 role="admin", action="open", category=category
-                            ),
+                            ).pack(),
                         )
                     ]
                 ]
