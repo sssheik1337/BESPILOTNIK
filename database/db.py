@@ -205,6 +205,9 @@ async def create_tables():
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 finished_at TIMESTAMPTZ DEFAULT NULL,
                 admin_tg_id BIGINT,
+                admin_username TEXT,
+                admin_first_name TEXT,
+                admin_last_name TEXT,
                 subdivision TEXT,
                 callsigns TEXT,
                 tasks TEXT,
@@ -212,6 +215,15 @@ async def create_tables():
                 media_path TEXT
             )
             """
+        )
+        await conn.execute(
+            "ALTER TABLE visits ADD COLUMN IF NOT EXISTS admin_username TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE visits ADD COLUMN IF NOT EXISTS admin_first_name TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE visits ADD COLUMN IF NOT EXISTS admin_last_name TEXT"
         )
         await conn.execute(
             "ALTER TABLE manuals ADD COLUMN IF NOT EXISTS file_name TEXT"
@@ -945,22 +957,32 @@ async def add_visit(
     tasks: str,
     media_type: str | None,
     media_path: str | None,
+    *,
+    admin_username: str | None = None,
+    admin_first_name: str | None = None,
+    admin_last_name: str | None = None,
 ) -> int:
     async with pool.acquire() as conn:
         visit_id = await conn.fetchval(
             """
             INSERT INTO visits (
                 admin_tg_id,
+                admin_username,
+                admin_first_name,
+                admin_last_name,
                 subdivision,
                 callsigns,
                 tasks,
                 media_type,
                 media_path
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING id
             """,
             admin_tg_id,
+            admin_username,
+            admin_first_name,
+            admin_last_name,
             subdivision,
             callsigns,
             tasks,
@@ -1035,7 +1057,7 @@ async def get_visits_for_export(
             """
             SELECT *
             FROM visits
-            ORDER BY created_at DESC
+            ORDER BY finished_at DESC NULLS LAST, created_at DESC
             """,
         )
         logger.info(
@@ -1043,6 +1065,41 @@ async def get_visits_for_export(
             len(visits),
         )
         return visits
+
+
+async def normalize_visit_media_paths(pool) -> None:
+    """Преобразует сохранённые файловые пути медиа визитов в публичные URL."""
+
+    from pathlib import Path
+
+    from config import PUBLIC_MEDIA_ROOT
+    from utils.storage import build_public_url
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, media_path FROM visits WHERE media_path IS NOT NULL"
+        )
+        for row in rows:
+            raw_path = row["media_path"]
+            if not raw_path:
+                continue
+
+            normalized = raw_path.replace("\\", "/")
+            if normalized.startswith("http://") or normalized.startswith("https://"):
+                continue
+
+            candidate = Path(PUBLIC_MEDIA_ROOT) / normalized
+            try:
+                public_url = build_public_url(candidate)
+            except ValueError:
+                continue
+
+            await conn.execute(
+                "UPDATE visits SET media_path = $1 WHERE id = $2",
+                public_url,
+                row["id"],
+            )
+            logger.debug("Обновлён путь медиа визита %s -> %s", raw_path, public_url)
 
 
 async def set_manual_file(category, file_name):

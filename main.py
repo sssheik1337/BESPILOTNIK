@@ -82,19 +82,12 @@ class SerialCheckMiddleware(BaseMiddleware):
             logger.debug("Нет внутреннего события в Update, пропускаем")
             return await handler(update, data)
 
-        if not hasattr(event, "chat"):
-            logger.debug(f"Пропускаем событие {type(event).__name__} без чата")
-            return await handler(update, data)
-
         user_id = None
         username = "неизвестно"
+
         if hasattr(event, "from_user") and event.from_user:
             user_id = event.from_user.id
             username = event.from_user.username or "неизвестно"
-
-        if user_id is None:
-            logger.debug("Не удалось определить user_id, пропускаем событие")
-            return await handler(update, data)
 
         state = data.get("state")
         if state is None:
@@ -124,6 +117,20 @@ class SerialCheckMiddleware(BaseMiddleware):
                 username,
                 user_id,
             )
+            return await handler(update, data)
+
+        if not hasattr(event, "chat"):
+            logger.debug(f"Пропускаем событие {type(event).__name__} без чата")
+            return await handler(update, data)
+
+        user_id = None
+        username = "неизвестно"
+        if hasattr(event, "from_user") and event.from_user:
+            user_id = event.from_user.id
+            username = event.from_user.username or "неизвестно"
+
+        if user_id is None:
+            logger.debug("Не удалось определить user_id, пропускаем событие")
             return await handler(update, data)
 
         if isinstance(event, Message):

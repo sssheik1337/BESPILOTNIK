@@ -160,24 +160,32 @@ async def export_visits_to_excel(visits: list, file_path: Path) -> Path:
         for visit in visits:
             created_at = visit.get("created_at")
             finished_at = visit.get("finished_at")
-            created_at_fmt = (
-                created_at.strftime("%d.%m.%Y %H:%M") if created_at else ""
+            visit_time = finished_at or created_at
+            visit_time_fmt = (
+                visit_time.strftime("%d.%m.%Y %H:%M") if visit_time else ""
             )
-            finished_at_fmt = (
-                finished_at.strftime("%d.%m.%Y %H:%M")
-                if finished_at
-                else "в процессе"
-            )
+
+            admin_parts = [str(visit.get("admin_tg_id", ""))]
+            username = visit.get("admin_username")
+            if username:
+                admin_parts.append(f"@{username}")
+            full_name = " ".join(
+                filter(None, [visit.get("admin_first_name"), visit.get("admin_last_name")])
+            ).strip()
+            if full_name:
+                admin_parts.append(full_name)
+            admin_display = " | ".join(filter(None, admin_parts))
+
+            media_link = visit.get("media_path") or ""
             data.append(
                 {
-                    "Дата/время начала визита": created_at_fmt,
-                    "Дата/время окончания визита": finished_at_fmt,
-                    "Telegram-ID администратора": visit.get("admin_tg_id", ""),
+                    "Дата/время визита": visit_time_fmt,
+                    "Администратор": admin_display,
                     "Подразделение": visit.get("subdivision", ""),
                     "Позывные": visit.get("callsigns", ""),
                     "Задачи": visit.get("tasks", ""),
                     "Тип медиа": visit.get("media_type", ""),
-                    "Путь к медиа": visit.get("media_path", ""),
+                    "Ссылка на медиа": media_link,
                 }
             )
 
