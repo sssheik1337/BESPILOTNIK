@@ -425,7 +425,9 @@ async def manuals_menu(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("manual_"))
+@router.callback_query(
+    F.data.in_({"manual_remote", "manual_erlc", "manual_nsu", "manual_drone"})
+)
 async def send_manual(callback: CallbackQuery):
     mapping = {
         "manual_remote": "remote",

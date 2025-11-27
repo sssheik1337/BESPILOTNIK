@@ -73,11 +73,13 @@ def get_manual_files_menu(category: str, files, *, is_admin: bool):
         control_row.append(
             InlineKeyboardButton(text="➕ Добавить файл", callback_data=f"manual_add_{category}")
         )
-        control_row.append(
-            InlineKeyboardButton(text="🗑 Удалить все", callback_data=f"manual_delete_all_{category}")
-        )
-        if control_row:
-            keyboard.append(control_row)
+        if files:
+            control_row.append(
+                InlineKeyboardButton(
+                    text="🗑 Удалить все", callback_data=f"manual_delete_all_{category}"
+                )
+            )
+        keyboard.append(control_row)
 
     keyboard.append(
         [

@@ -194,7 +194,16 @@ def _sanitize_filename_component(value: str) -> str:
 
 async def _fetch_admin_record(db_pool, user_id: int):
     async with db_pool.acquire() as conn:
-        return await conn.fetchrow("SELECT * FROM admins WHERE admin_id = $1", user_id)
+        record = await conn.fetchrow("SELECT * FROM admins WHERE admin_id = $1", user_id)
+    if record:
+        return record
+    if user_id in MAIN_ADMIN_IDS:
+        return {
+            "admin_id": user_id,
+            "username": None,
+            "is_main_admin": True,
+        }
+    return None
 
 
 def _exam_back_markup(callback: str = "exam_menu") -> InlineKeyboardMarkup:
