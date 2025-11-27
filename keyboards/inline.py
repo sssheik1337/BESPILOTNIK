@@ -1,5 +1,5 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils.callback_data import CallbackData
+from aiogram.filters.callback_data import CallbackData
 from config import MAIN_ADMIN_IDS
 from utils.statuses import APPEAL_STATUSES
 import logging
