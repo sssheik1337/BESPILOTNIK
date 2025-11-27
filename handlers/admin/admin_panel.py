@@ -192,6 +192,11 @@ def _sanitize_filename_component(value: str) -> str:
     return cleaned or "media"
 
 
+async def _fetch_admin_record(db_pool, user_id: int):
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM admins WHERE admin_id = $1", user_id)
+
+
 def _exam_back_markup(callback: str = "exam_menu") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=callback)]]
@@ -655,17 +660,28 @@ async def admin_panel_prompt(callback: CallbackQuery, **data):
 
 @router.callback_query(F.data == "manage_visits")
 async def manage_visits_menu(callback: CallbackQuery, **data):
-    if callback.from_user.id not in MAIN_ADMIN_IDS:
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при открытии меню визитов")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]
+            ),
+        )
+        await callback.answer()
+        return
+
+    admin = await _fetch_admin_record(db_pool, callback.from_user.id)
+    if not admin:
         await callback.message.edit_text(
             "Доступ запрещён.",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-                ]
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]
             ),
         )
         logger.warning(
-            "Попытка открытия меню визитов от неадминистратора @%s", callback.from_user.username
+            "Попытка открытия меню визитов без прав от пользователя @%s", callback.from_user.username
         )
         return
     await callback.message.edit_text("Учёт визитов:", reply_markup=get_visits_menu())
@@ -678,18 +694,29 @@ async def manage_visits_menu(callback: CallbackQuery, **data):
 
 
 @router.callback_query(F.data == "visit_start")
-async def visit_start(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in MAIN_ADMIN_IDS:
+async def visit_start(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при начале визита")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]
+            ),
+        )
+        await callback.answer()
+        return
+
+    admin = await _fetch_admin_record(db_pool, callback.from_user.id)
+    if not admin:
         await callback.message.edit_text(
             "Доступ запрещён.",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-                ]
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]
             ),
         )
         logger.warning(
-            "Попытка начала визита от неадминистратора @%s", callback.from_user.username
+            "Попытка начала визита без прав от пользователя @%s", callback.from_user.username
         )
         return
     await state.set_state(VisitState.subdivision)
@@ -707,7 +734,27 @@ async def visit_start(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(StateFilter(VisitState.subdivision))
-async def visit_subdivision_handler(message: Message, state: FSMContext):
+async def visit_subdivision_handler(message: Message, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при вводе подразделения визита")
+        await message.answer(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=_single_back_keyboard("main_menu"),
+        )
+        await state.clear()
+        return
+
+    admin = await _fetch_admin_record(db_pool, message.from_user.id)
+    if not admin:
+        await message.answer(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка ввода подразделения без прав от пользователя @%s", message.from_user.username
+        )
+        return
     subdivision = (message.text or "").strip()
     if not subdivision:
         await message.answer(
@@ -733,7 +780,28 @@ async def visit_subdivision_handler(message: Message, state: FSMContext):
 
 
 @router.message(StateFilter(VisitState.callsigns))
-async def visit_callsigns_handler(message: Message, state: FSMContext):
+async def visit_callsigns_handler(message: Message, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при вводе позывных визита")
+        await message.answer(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=_single_back_keyboard("main_menu"),
+        )
+        await state.clear()
+        return
+
+    admin = await _fetch_admin_record(db_pool, message.from_user.id)
+    if not admin:
+        await message.answer(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка ввода позывных без прав от пользователя @%s", message.from_user.username
+        )
+        return
+
     callsigns = (message.text or "").strip()
     if not callsigns:
         await message.answer(
@@ -760,7 +828,28 @@ async def visit_callsigns_handler(message: Message, state: FSMContext):
 
 
 @router.message(StateFilter(VisitState.tasks))
-async def visit_tasks_handler(message: Message, state: FSMContext):
+async def visit_tasks_handler(message: Message, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при вводе задач визита")
+        await message.answer(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=_single_back_keyboard("main_menu"),
+        )
+        await state.clear()
+        return
+
+    admin = await _fetch_admin_record(db_pool, message.from_user.id)
+    if not admin:
+        await message.answer(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка ввода задач без прав от пользователя @%s", message.from_user.username
+        )
+        return
+
     tasks = (message.text or "").strip()
     if not tasks:
         await message.answer(
@@ -796,6 +885,17 @@ async def visit_media_handler(message: Message, state: FSMContext, **data):
             reply_markup=_visit_media_keyboard(),
         )
         await state.clear()
+        return
+
+    admin = await _fetch_admin_record(db_pool, message.from_user.id)
+    if not admin:
+        await message.answer(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка загрузки медиа визита без прав от пользователя @%s", message.from_user.username
+        )
         return
 
     state_data = await state.get_data()
@@ -933,6 +1033,18 @@ async def visit_media_skip(callback: CallbackQuery, state: FSMContext, **data):
         await state.clear()
         return
 
+    admin = await _fetch_admin_record(db_pool, callback.from_user.id)
+    if not admin:
+        await callback.message.edit_text(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка пропуска медиа без прав от пользователя @%s", callback.from_user.username
+        )
+        await callback.answer()
+        return
+
     state_data = await state.get_data()
     await state.update_data(media_type="none", media_path=None)
     await _show_visit_preview(callback, state, user=callback.from_user)
@@ -948,6 +1060,18 @@ async def visit_save(callback: CallbackQuery, state: FSMContext, **data):
             "Ошибка сервера. Попробуйте позже.", reply_markup=get_visits_menu()
         )
         await state.clear()
+        return
+
+    admin = await _fetch_admin_record(db_pool, callback.from_user.id)
+    if not admin:
+        await callback.message.edit_text(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка сохранения визита без прав от пользователя @%s", callback.from_user.username
+        )
+        await callback.answer()
         return
 
     state_data = await state.get_data()
@@ -1008,7 +1132,28 @@ async def visit_save(callback: CallbackQuery, state: FSMContext, **data):
     ),
     StateFilter(VisitState.review),
 )
-async def visit_edit_field(callback: CallbackQuery, state: FSMContext):
+async def visit_edit_field(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при редактировании визита")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.", reply_markup=get_visits_menu()
+        )
+        await state.clear()
+        return
+
+    admin = await _fetch_admin_record(db_pool, callback.from_user.id)
+    if not admin:
+        await callback.message.edit_text(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка редактирования визита без прав от пользователя @%s", callback.from_user.username
+        )
+        await callback.answer()
+        return
+
     target = callback.data
     await state.update_data(return_to_review=True)
     if target == "visit_edit_subdivision":
@@ -1042,7 +1187,29 @@ async def visit_edit_field(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "visit_cancel", StateFilter(VisitState.review))
-async def visit_cancel(callback: CallbackQuery, state: FSMContext):
+async def visit_cancel(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при отмене визита")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.", reply_markup=get_visits_menu()
+        )
+        await state.clear()
+        await callback.answer()
+        return
+
+    admin = await _fetch_admin_record(db_pool, callback.from_user.id)
+    if not admin:
+        await callback.message.edit_text(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка отмены визита без прав от пользователя @%s", callback.from_user.username
+        )
+        await callback.answer()
+        return
+
     await state.clear()
     await callback.message.edit_text(
         "Визит отменён.", reply_markup=get_visits_menu()
@@ -1053,26 +1220,26 @@ async def visit_cancel(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "visit_export")
 async def visit_export_handler(callback: CallbackQuery, **data):
-    if callback.from_user.id not in MAIN_ADMIN_IDS:
-        await callback.message.edit_text(
-            "Доступ запрещён.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-                ]
-            ),
-        )
-        logger.warning(
-            "Попытка выгрузки визитов от неадминистратора @%s", callback.from_user.username
-        )
-        return
-
     db_pool = data.get("db_pool")
     if not db_pool:
         logger.error("db_pool отсутствует в data при выгрузке визитов")
         await callback.message.edit_text(
             "Ошибка сервера. Попробуйте позже.", reply_markup=get_visits_menu()
         )
+        return
+
+    admin = await _fetch_admin_record(db_pool, callback.from_user.id)
+    if not admin:
+        await callback.message.edit_text(
+            "Доступ запрещён.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]
+            ),
+        )
+        logger.warning(
+            "Попытка выгрузки визитов без прав от пользователя @%s", callback.from_user.username
+        )
+        await callback.answer()
         return
 
     await normalize_visit_media_paths(db_pool)
