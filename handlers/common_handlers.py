@@ -37,6 +37,7 @@ router = Router()
 
 class UserState(StatesGroup):
     waiting_for_auto_delete = State()
+    waiting_for_code_word = State()
     waiting_for_serial = State()
     menu = State()
 
@@ -204,7 +205,7 @@ async def request_support(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     username = callback.from_user.username or "неизвестно"
     await callback.message.edit_text(
-        "Введите серийный номер:",
+        "Введите кодовое слово:",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
@@ -212,8 +213,10 @@ async def request_support(callback: CallbackQuery, state: FSMContext):
         ),
     )
     await state.update_data(scenario="support")
-    await state.set_state(UserState.waiting_for_serial)
-    logger.debug(f"Пользователь @{username} (ID: {user_id}) выбрал запрос техподдержки")
+    await state.set_state(UserState.waiting_for_code_word)
+    logger.debug(
+        f"Пользователь @{username} (ID: {user_id}) выбрал запрос техподдержки и ожидает кодовое слово"
+    )
     await callback.answer()
 
 
@@ -222,7 +225,7 @@ async def setup_manual(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     username = callback.from_user.username or "неизвестно"
     await callback.message.edit_text(
-        "Введите серийный номер:",
+        "Введите кодовое слово:",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
@@ -230,11 +233,70 @@ async def setup_manual(callback: CallbackQuery, state: FSMContext):
         ),
     )
     await state.update_data(scenario="manual")
-    await state.set_state(UserState.waiting_for_serial)
+    await state.set_state(UserState.waiting_for_code_word)
     logger.debug(
-        f"Пользователь @{username} (ID: {user_id}) выбрал руководство по настройке"
+        f"Пользователь @{username} (ID: {user_id}) выбрал руководство по настройке и ожидает кодовое слово"
     )
     await callback.answer()
+
+
+@router.message(StateFilter(UserState.waiting_for_code_word))
+async def process_code_word_user(message: Message, state: FSMContext, **data):
+    user_id = message.from_user.id
+    username = message.from_user.username or "неизвестно"
+    code_word = message.text.strip()
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при проверке кодового слова пользователя")
+        await message.answer(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
+                ]
+            ),
+        )
+        return
+    async with db_pool.acquire() as conn:
+        db_code_word = await conn.fetchval(
+            "SELECT code_word FROM training_centers WHERE code_word = $1", code_word
+        )
+        if not db_code_word:
+            await message.answer(
+                "Неверное кодовое слово. Попробуйте снова:",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="⬅️ Назад", callback_data="select_scenario"
+                            )
+                        ]
+                    ]
+                ),
+            )
+            logger.warning(
+                f"Неверное кодовое слово '{code_word}' от @{username} (ID: {user_id}) для пользовательского сценария"
+            )
+            return
+    await state.update_data(code_word=code_word)
+    await message.answer(
+        "Введите серийный номер:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
+            ]
+        ),
+    )
+    await state.set_state(UserState.waiting_for_serial)
+    logger.info(
+        f"Кодовое слово принято от @{username} (ID: {user_id}); переход к запросу серийного номера"
+    )
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        logger.debug(
+            f"Не удалось удалить сообщение с кодовым словом от @{username} (ID: {user_id})"
+        )
 
 
 @router.callback_query(F.data == "select_scenario")
