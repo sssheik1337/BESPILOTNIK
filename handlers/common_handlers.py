@@ -453,12 +453,13 @@ async def send_manual(callback: CallbackQuery, callback_data: dict):
         file_path = public_root() / record["file_path"]
         reply_markup = back_markup if idx == total - 1 else None
         caption = record["file_name"]
+        file_type = record["file_type"] if "file_type" in record else None
         try:
-            if record.get("file_type") == "image":
+            if file_type == "image":
                 await callback.message.answer_photo(
                     FSInputFile(file_path), caption=caption, reply_markup=reply_markup
                 )
-            elif record.get("file_type") == "video":
+            elif file_type == "video":
                 await callback.message.answer_video(
                     FSInputFile(file_path), caption=caption, reply_markup=reply_markup
                 )
@@ -470,7 +471,7 @@ async def send_manual(callback: CallbackQuery, callback_data: dict):
             logger.error(
                 "Не удалось отправить файл руководства %s (%s): %s",
                 record["file_name"],
-                record.get("file_type"),
+                file_type,
                 exc,
             )
             if reply_markup:
