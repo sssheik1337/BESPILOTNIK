@@ -59,7 +59,7 @@ def get_manuals_menu():
             ],
             [
                 InlineKeyboardButton(
-                    text="🧰 Прошивка ЕРЛС",
+                    text="🧰 Прошивка ЕРЛС (молния)",
                     callback_data=manual_category_cb(
                         role="user", action="open", category="erls_firmware"
                     ).pack(),
@@ -724,7 +724,7 @@ def get_manuals_admin_menu():
             ],
             [
                 InlineKeyboardButton(
-                    text="Прошивка ЕРЛС",
+                    text="Прошивка ЕРЛС (молния)",
                     callback_data=manual_category_cb(
                         role="admin", action="open", category="erls_firmware"
                     ).pack(),
