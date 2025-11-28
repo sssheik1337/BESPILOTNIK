@@ -27,7 +27,7 @@ import logging
 import traceback
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from utils.validators import validate_serial
-from database.db import get_serial_history, get_manual_files
+from database.db import get_serial_history, get_manual_files, get_user_training_invite
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -84,6 +84,11 @@ def _scenario_selection_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="📘 Руководство по настройке", callback_data="setup_manual"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏫 Мой УТЦ", callback_data="my_training"
                 )
             ],
         ]
@@ -240,6 +245,49 @@ async def setup_manual(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+@router.callback_query(F.data == "my_training")
+async def open_my_training(callback: CallbackQuery, state: FSMContext, **data):
+    user_id = callback.from_user.id
+    username = callback.from_user.username or "неизвестно"
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при запросе 'Мой УТЦ'")
+        await callback.answer("Ошибка сервера. Попробуйте позже.", show_alert=True)
+        return
+
+    record = await get_user_training_invite(user_id)
+    if not record or not record.get("chat_link"):
+        await callback.answer("Запишитесь на обучение", show_alert=True)
+        logger.info(
+            "Пользователь @%s (ID: %s) запросил 'Мой УТЦ', но записи не найдены",
+            username,
+            user_id,
+        )
+        return
+
+    await callback.message.edit_text(
+        "Введите кодовое слово:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
+            ]
+        ),
+    )
+    await state.update_data(
+        scenario="my_training",
+        training_link=record.get("chat_link"),
+        training_center=record.get("center_name"),
+    )
+    await state.set_state(UserState.waiting_for_code_word)
+    logger.debug(
+        "Пользователь @%s (ID: %s) запросил доступ к УТЦ '%s'", 
+        username,
+        user_id,
+        record.get("center_name"),
+    )
+    await callback.answer()
+
+
 @router.message(StateFilter(UserState.waiting_for_code_word))
 async def process_code_word_user(message: Message, state: FSMContext, **data):
     user_id = message.from_user.id
@@ -279,18 +327,79 @@ async def process_code_word_user(message: Message, state: FSMContext, **data):
             )
             return
     await state.update_data(code_word=code_word)
-    await message.answer(
-        "Введите серийный номер:",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
-            ]
-        ),
-    )
-    await state.set_state(UserState.waiting_for_serial)
-    logger.info(
-        f"Кодовое слово принято от @{username} (ID: {user_id}); переход к запросу серийного номера"
-    )
+    data_state = await state.get_data()
+    scenario = data_state.get("scenario")
+    if scenario == "my_training":
+        training_link = data_state.get("training_link")
+        training_center = data_state.get("training_center") or "УТЦ"
+        if not training_link:
+            await message.answer(
+                "Пригласительная ссылка не найдена. Обратитесь к администратору.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="⬅️ Назад", callback_data="select_scenario"
+                            )
+                        ]
+                    ]
+                ),
+            )
+            await state.update_data(
+                scenario=None,
+                code_word=None,
+                training_link=None,
+                training_center=None,
+            )
+            await state.set_state(None)
+            logger.warning(
+                "Для пользователя @%s (ID: %s) не найдена ссылка на УТЦ при подтверждении кодового слова",
+                username,
+                user_id,
+            )
+        else:
+            await message.answer(
+                f"Ваш учебный центр: {training_center}\nПригласительная ссылка доступна ниже.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="Перейти в чат УТЦ", url=training_link
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text="⬅️ Назад", callback_data="select_scenario"
+                            )
+                        ],
+                    ]
+                ),
+            )
+            await state.update_data(
+                scenario=None,
+                code_word=None,
+                training_link=None,
+                training_center=None,
+            )
+            await state.set_state(None)
+            logger.info(
+                "Пользователь @%s (ID: %s) получил пригласительную ссылку УТЦ",
+                username,
+                user_id,
+            )
+    else:
+        await message.answer(
+            "Введите серийный номер:",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
+                ]
+            ),
+        )
+        await state.set_state(UserState.waiting_for_serial)
+        logger.info(
+            f"Кодовое слово принято от @{username} (ID: {user_id}); переход к запросу серийного номера"
+        )
     try:
         await message.delete()
     except TelegramBadRequest:

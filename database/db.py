@@ -183,6 +183,9 @@ async def create_tables():
         await conn.execute(
             "ALTER TABLE exam_records ADD COLUMN IF NOT EXISTS accepted_date TEXT"
         )
+        await conn.execute(
+            "ALTER TABLE exam_records ADD COLUMN IF NOT EXISTS user_id BIGINT"
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_messages (
                 message_id BIGINT,
@@ -262,6 +265,7 @@ async def add_exam_record(
     contact,
     personal_number,
     training_center_id,
+    user_id=None,
     video_link=None,
     photo_links=None,
     application_date=None,
@@ -279,8 +283,8 @@ async def add_exam_record(
         else:
             photo_links_payload = photo_links if photo_links else None
         exam_id = await conn.fetchval(
-            "INSERT INTO exam_records (fio, subdivision, military_unit, callsign, specialty, contact, personal_number, training_center_id, video_link, photo_links, normalized, application_date, accepted_date) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING exam_id",
+            "INSERT INTO exam_records (fio, subdivision, military_unit, callsign, specialty, contact, personal_number, training_center_id, video_link, photo_links, normalized, application_date, accepted_date, user_id) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING exam_id",
             fio,
             subdivision,
             military_unit,
@@ -294,6 +298,7 @@ async def add_exam_record(
             normalized,
             application_date,
             accepted_date,
+            user_id,
         )
         logger.info(
             f"Экзамен №{exam_id} добавлен для {fio} с УТЦ ID {training_center_id}"
@@ -507,6 +512,27 @@ async def get_training_centers():
         )
         logger.info(f"Запрошены УТЦ, найдено: {len(centers)}")
         return centers
+
+
+async def get_user_training_invite(user_id: int):
+    async with pool.acquire() as conn:
+        record = await conn.fetchrow(
+            """
+            SELECT er.training_center_id, tc.center_name, tc.chat_link
+            FROM exam_records er
+            LEFT JOIN training_centers tc ON er.training_center_id = tc.id
+            WHERE er.user_id = $1
+            ORDER BY er.exam_id DESC
+            LIMIT 1
+            """,
+            user_id,
+        )
+        logger.info(
+            "Запрошена последняя запись обучения для пользователя ID %s: %s",
+            user_id,
+            "найдена" if record else "не найдена",
+        )
+        return record
 
 
 async def get_code_word():

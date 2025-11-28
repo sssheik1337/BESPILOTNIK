@@ -39,6 +39,7 @@ def get_user_menu():
                     text="📋 Мои обращения", callback_data="my_appeals_user"
                 )
             ],
+            [InlineKeyboardButton(text="🏫 Мой УТЦ", callback_data="my_training")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
         ]
     )

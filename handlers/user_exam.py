@@ -380,6 +380,7 @@ async def process_training_center(callback: CallbackQuery, state: FSMContext, **
                 contact=contact,
                 personal_number=personal_number,
                 training_center_id=center_id,
+                user_id=user_id,
                 application_date=now_str,
             )
         await callback.message.edit_text(
