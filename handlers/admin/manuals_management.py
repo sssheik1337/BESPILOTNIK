@@ -186,6 +186,7 @@ async def receive_manual_file(message: Message, state: FSMContext):
     download_result = None
     progress_message = None
     media_kind = None
+    file_type = "document"
 
     try:
         file_id = None
@@ -196,11 +197,13 @@ async def receive_manual_file(message: Message, state: FSMContext):
             original_name = message.document.file_name or "document.bin"
         elif message.photo:
             media_kind = "photo"
+            file_type = "image"
             largest_photo = message.photo[-1]
             file_id = largest_photo.file_id
             original_name = f"photo_{file_id}.jpg"
         elif message.video:
             media_kind = "video"
+            file_type = "video"
             file_id = message.video.file_id
             original_name = message.video.file_name or f"video_{file_id}.mp4"
 
@@ -289,7 +292,7 @@ async def receive_manual_file(message: Message, state: FSMContext):
             await _cleanup_source_file(source_path)
 
         relative_path = Path("manuals") / category / safe_name
-        await add_manual_file(category, safe_name, str(relative_path))
+        await add_manual_file(category, safe_name, str(relative_path), file_type)
 
         await message.answer(
             "Файл добавлен. Что дальше?",
@@ -348,13 +351,28 @@ async def show_manual_file(callback: CallbackQuery, callback_data: dict):
     keyboard = get_manual_file_actions(category, file_id, is_admin=True)
 
     try:
-        await callback.message.answer_document(
-            FSInputFile(file_path),
-            caption=f"{_category_title(category)} — {record['file_name']}",
-            reply_markup=keyboard,
-        )
+        if record.get("file_type") == "image":
+            await callback.message.answer_photo(
+                FSInputFile(file_path),
+                caption=f"{_category_title(category)} — {record['file_name']}",
+                reply_markup=keyboard,
+            )
+        elif record.get("file_type") == "video":
+            await callback.message.answer_video(
+                FSInputFile(file_path),
+                caption=f"{_category_title(category)} — {record['file_name']}",
+                reply_markup=keyboard,
+            )
+        else:
+            await callback.message.answer_document(
+                FSInputFile(file_path),
+                caption=f"{_category_title(category)} — {record['file_name']}",
+                reply_markup=keyboard,
+            )
     except Exception as exc:
-        logger.error("Не удалось отправить файл руководства %s: %s", record["file_name"], exc)
+        logger.error(
+            "Не удалось отправить файл руководства %s: %s", record["file_name"], exc
+        )
         await callback.message.answer("Не удалось отправить файл.", reply_markup=keyboard)
     await callback.answer()
 
@@ -372,13 +390,28 @@ async def show_manual_file_user(callback: CallbackQuery, callback_data: dict):
     file_path = _absolute_path(record["file_path"])
     keyboard = get_manual_file_actions(category, file_id, is_admin=False)
     try:
-        await callback.message.answer_document(
-            FSInputFile(file_path),
-            caption=record["file_name"],
-            reply_markup=keyboard,
-        )
+        if record.get("file_type") == "image":
+            await callback.message.answer_photo(
+                FSInputFile(file_path),
+                caption=record["file_name"],
+                reply_markup=keyboard,
+            )
+        elif record.get("file_type") == "video":
+            await callback.message.answer_video(
+                FSInputFile(file_path),
+                caption=record["file_name"],
+                reply_markup=keyboard,
+            )
+        else:
+            await callback.message.answer_document(
+                FSInputFile(file_path),
+                caption=record["file_name"],
+                reply_markup=keyboard,
+            )
     except Exception as exc:
-        logger.error("Не удалось отправить файл руководства %s: %s", record["file_name"], exc)
+        logger.error(
+            "Не удалось отправить файл руководства %s: %s", record["file_name"], exc
+        )
         await callback.message.answer("Не удалось отправить файл.", reply_markup=keyboard)
     await callback.answer()
 

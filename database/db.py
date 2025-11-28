@@ -205,9 +205,13 @@ async def create_tables():
                 category TEXT NOT NULL,
                 file_name TEXT NOT NULL,
                 file_path TEXT NOT NULL,
+                file_type TEXT NOT NULL DEFAULT 'document',
                 uploaded_at TIMESTAMPTZ DEFAULT NOW()
             )
             """
+        )
+        await conn.execute(
+            "ALTER TABLE manuals_files ADD COLUMN IF NOT EXISTS file_type TEXT NOT NULL DEFAULT 'document'"
         )
         await conn.execute(
             """
@@ -1150,17 +1154,20 @@ async def get_manual_file(category):
         return dict(record) if record else None
 
 
-async def add_manual_file(category: str, file_name: str, file_path: str) -> int:
+async def add_manual_file(
+    category: str, file_name: str, file_path: str, file_type: str
+) -> int:
     async with pool.acquire() as conn:
         record = await conn.fetchrow(
             """
-            INSERT INTO manuals_files (category, file_name, file_path, uploaded_at)
-            VALUES ($1, $2, $3, NOW())
+            INSERT INTO manuals_files (category, file_name, file_path, file_type, uploaded_at)
+            VALUES ($1, $2, $3, $4, NOW())
             RETURNING id
             """,
             category,
             file_name,
             file_path,
+            file_type,
         )
         logger.info("Добавлен файл руководства %s (%s)", category, file_name)
         return record["id"]
@@ -1170,10 +1177,9 @@ async def get_manual_files(category: str):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, category, file_name, file_path, uploaded_at
+            SELECT id, category, file_name, file_path, file_type, uploaded_at
             FROM manuals_files
             WHERE category = $1
-            ORDER BY uploaded_at ASC, id ASC
             """,
             category,
         )
@@ -1187,7 +1193,7 @@ async def get_manual_file_by_id(file_id: int):
     async with pool.acquire() as conn:
         record = await conn.fetchrow(
             """
-            SELECT id, category, file_name, file_path, uploaded_at
+            SELECT id, category, file_name, file_path, file_type, uploaded_at
             FROM manuals_files
             WHERE id = $1
             """,

@@ -442,11 +442,44 @@ async def send_manual(callback: CallbackQuery, callback_data: dict):
                 inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manuals")]]
             ),
         )
-    else:
-        await callback.message.answer(
-            "Выберите файл руководства:",
-            reply_markup=get_manual_files_menu(category, files, is_admin=False),
-        )
+        await callback.answer()
+        return
+
+    back_markup = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manuals")]]
+    )
+    total = len(files)
+    for idx, record in enumerate(files):
+        file_path = public_root() / record["file_path"]
+        reply_markup = back_markup if idx == total - 1 else None
+        caption = record["file_name"]
+        try:
+            if record.get("file_type") == "image":
+                await callback.message.answer_photo(
+                    FSInputFile(file_path), caption=caption, reply_markup=reply_markup
+                )
+            elif record.get("file_type") == "video":
+                await callback.message.answer_video(
+                    FSInputFile(file_path), caption=caption, reply_markup=reply_markup
+                )
+            else:
+                await callback.message.answer_document(
+                    FSInputFile(file_path), caption=caption, reply_markup=reply_markup
+                )
+        except Exception as exc:  # pragma: no cover - сетевые ошибки Telegram
+            logger.error(
+                "Не удалось отправить файл руководства %s (%s): %s",
+                record["file_name"],
+                record.get("file_type"),
+                exc,
+            )
+            if reply_markup:
+                await callback.message.answer(
+                    "Не удалось отправить файл.", reply_markup=reply_markup
+                )
+            else:
+                await callback.message.answer("Не удалось отправить файл.")
+
     await callback.answer()
 
 
