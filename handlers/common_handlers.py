@@ -452,20 +452,19 @@ async def send_manual(callback: CallbackQuery, callback_data: dict):
     for idx, record in enumerate(files):
         file_path = public_root() / record["file_path"]
         reply_markup = back_markup if idx == total - 1 else None
-        caption = record["file_name"]
         file_type = record["file_type"] if "file_type" in record else None
         try:
             if file_type == "image":
                 await callback.message.answer_photo(
-                    FSInputFile(file_path), caption=caption, reply_markup=reply_markup
+                    FSInputFile(file_path), reply_markup=reply_markup
                 )
             elif file_type == "video":
                 await callback.message.answer_video(
-                    FSInputFile(file_path), caption=caption, reply_markup=reply_markup
+                    FSInputFile(file_path), reply_markup=reply_markup
                 )
             else:
                 await callback.message.answer_document(
-                    FSInputFile(file_path), caption=caption, reply_markup=reply_markup
+                    FSInputFile(file_path), reply_markup=reply_markup
                 )
         except Exception as exc:  # pragma: no cover - сетевые ошибки Telegram
             logger.error(
