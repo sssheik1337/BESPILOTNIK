@@ -11,7 +11,7 @@ from aiogram.types import (
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
-from config import TOKEN, API_BASE_URL, WEBHOOK_URL, MAIN_ADMIN_IDS
+from config import TOKEN, API_BASE_URL, WEBHOOK_URL, MAIN_ADMIN_IDS, LOG_FILE_PATH
 from urllib.parse import quote
 
 from utils.storage import ensure_within_public_root, public_root
@@ -30,15 +30,13 @@ from database.db import initialize_db, close_db, get_open_appeals, close_appeal
 from aiogram.client.session.aiohttp import AiohttpSession
 from datetime import datetime
 
+log_path = Path(LOG_FILE_PATH)
+log_path.parent.mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(
-            "C:\\Users\\hrome\\PycharmProjects\\BESPILOTNIK\\bot_err.log"
-        ),
-    ],
+    handlers=[logging.StreamHandler(), logging.FileHandler(log_path)],
 )
 logging.getLogger("aiohttp.server").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -352,5 +350,6 @@ if __name__ == "__main__":
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[logging.StreamHandler(), logging.FileHandler(log_path)],
     )
     main()

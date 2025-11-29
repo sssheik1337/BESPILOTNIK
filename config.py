@@ -7,6 +7,8 @@ LOCAL_BOT_API_REMOTE_DIR = "/var/lib/telegram-bot-api"
 LOCAL_BOT_API_DATA_DIR = None
 # Каталог для локального кеша загруженных файлов (используется для сжатия видео и резервных копий)
 LOCAL_BOT_API_CACHE_DIR = "data/telegram_files"
+# Путь к файлу логов бота
+LOG_FILE_PATH = f"{LOCAL_BOT_API_CACHE_DIR}/bot_err.log"
 NGROK_PUBLIC_URL = "https://10bdf31051e0.ngrok-free.app"  # Замени на адрес от ngrok
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{NGROK_PUBLIC_URL.rstrip('/')}{WEBHOOK_PATH}"
