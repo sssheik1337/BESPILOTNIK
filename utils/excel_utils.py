@@ -18,11 +18,13 @@ async def import_serials(file_io, db_pool):
         if hasattr(file_io, "seek"):
             file_io.seek(0)
         df = pd.read_excel(file_io, engine="openpyxl")
-        if "Serial" not in df.columns:
+        columns_map = {col.lower(): col for col in df.columns}
+        if "serial" not in columns_map:
             logger.error("Отсутствует столбец 'Serial' в загруженном файле")
             return None, "Файл должен содержать столбец 'Serial'.", None
 
-        serials = df["Serial"].dropna().astype(str).tolist()
+        serial_column = columns_map["serial"]
+        serials = df[serial_column].dropna().astype(str).tolist()
 
         result = {"added": 0, "skipped": 0, "invalid": []}
         existing_serials = set()

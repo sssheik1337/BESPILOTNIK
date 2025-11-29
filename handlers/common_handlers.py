@@ -307,7 +307,8 @@ async def process_code_word_user(message: Message, state: FSMContext, **data):
         return
     async with db_pool.acquire() as conn:
         db_code_word = await conn.fetchval(
-            "SELECT code_word FROM training_centers WHERE code_word = $1", code_word
+            "SELECT code_word FROM training_centers WHERE LOWER(code_word) = LOWER($1)",
+            code_word,
         )
         if not db_code_word:
             await message.answer(
