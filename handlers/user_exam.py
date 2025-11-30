@@ -33,6 +33,7 @@ class UserExam(StatesGroup):
     specialty = State()
     contact = State()
     training_center = State()
+    review = State()
 
 
 @router.callback_query(F.data == "enroll_training")
@@ -68,7 +69,8 @@ async def process_code_word(message: Message, state: FSMContext, **data):
         return
     async with db_pool.acquire() as conn:
         db_code_word = await conn.fetchval(
-            "SELECT code_word FROM training_centers WHERE code_word = $1", code_word
+            "SELECT code_word FROM training_centers WHERE LOWER(code_word) = LOWER($1)",
+            code_word,
         )
         logger.debug(f"Запрошено кодовое слово: {db_code_word}")
         if not db_code_word:
@@ -109,6 +111,8 @@ async def process_code_word(message: Message, state: FSMContext, **data):
 async def process_fio(message: Message, state: FSMContext, bot: Bot):
     fio = message.text.strip()
     await state.update_data(fio=fio)
+    if await _maybe_return_to_review(message, state):
+        return
     await message.answer(
         "Введите личный номер или жетон (например, АВ-449852):",
         reply_markup=InlineKeyboardMarkup(
@@ -136,6 +140,8 @@ async def process_fio(message: Message, state: FSMContext, bot: Bot):
 async def process_personal_number(message: Message, state: FSMContext, bot: Bot):
     personal_number = message.text.strip()
     await state.update_data(personal_number=personal_number)
+    if await _maybe_return_to_review(message, state):
+        return
     await message.answer(
         "Введите военную часть (например, В/Ч 29657):",
         reply_markup=InlineKeyboardMarkup(
@@ -163,6 +169,8 @@ async def process_personal_number(message: Message, state: FSMContext, bot: Bot)
 async def process_military_unit(message: Message, state: FSMContext, bot: Bot):
     military_unit = message.text.strip()
     await state.update_data(military_unit=military_unit)
+    if await _maybe_return_to_review(message, state):
+        return
     await message.answer(
         "Введите подразделение:",
         reply_markup=InlineKeyboardMarkup(
@@ -190,6 +198,8 @@ async def process_military_unit(message: Message, state: FSMContext, bot: Bot):
 async def process_subdivision(message: Message, state: FSMContext, bot: Bot):
     subdivision = message.text.strip()
     await state.update_data(subdivision=subdivision)
+    if await _maybe_return_to_review(message, state):
+        return
     await message.answer(
         "Введите позывной:",
         reply_markup=InlineKeyboardMarkup(
@@ -217,8 +227,10 @@ async def process_subdivision(message: Message, state: FSMContext, bot: Bot):
 async def process_callsign(message: Message, state: FSMContext, bot: Bot):
     callsign = message.text.strip()
     await state.update_data(callsign=callsign)
+    if await _maybe_return_to_review(message, state):
+        return
     await message.answer(
-        "Введите направление:",
+        "Введите направление (например, \"Север\", \"Юг\", \"Днепр\", \"Покровск\"):",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
@@ -244,6 +256,8 @@ async def process_callsign(message: Message, state: FSMContext, bot: Bot):
 async def process_specialty(message: Message, state: FSMContext, bot: Bot):
     specialty = message.text.strip()
     await state.update_data(specialty=specialty)
+    if await _maybe_return_to_review(message, state):
+        return
     await message.answer(
         "Введите контакт для связи в Telegram:",
         reply_markup=InlineKeyboardMarkup(
@@ -268,48 +282,10 @@ async def process_specialty(message: Message, state: FSMContext, bot: Bot):
 async def process_contact(message: Message, state: FSMContext, bot: Bot):
     contact = message.text.strip()
     await state.update_data(contact=contact)
-    centers = await get_training_centers()
-    if not centers:
-        await message.answer(
-            "Учебные центры не найдены. Обратитесь к администратору.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-                ]
-            ),
-        )
-        logger.warning(
-            f"УТЦ не найдены для @{message.from_user.username} (ID: {message.from_user.id})"
-        )
-        await state.clear()
-        try:
-            await bot.delete_message(
-                chat_id=message.chat.id, message_id=message.message_id
-            )
-            logger.debug(
-                f"Сообщение с контактом удалено для @{message.from_user.username} (ID: {message.from_user.id})"
-            )
-        except Exception as e:
-            logger.error(
-                f"Ошибка удаления сообщения с контактом для @{message.from_user.username}: {str(e)}"
-            )
+    if await _maybe_return_to_review(message, state):
         return
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=center["center_name"],
-                    callback_data=f"select_center_{center['id']}",
-                )
-            ]
-            for center in centers
-        ]
-    )
-    keyboard.inline_keyboard.append(
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
-    )
-    await message.answer("Выберите учебный центр:", reply_markup=keyboard)
-    await state.set_state(UserExam.training_center)
+    await _send_exam_review(message, state)
+    await state.set_state(UserExam.review)
     logger.debug(
         f"Контакт {contact} принят от @{message.from_user.username} (ID: {message.from_user.id})"
     )
@@ -405,6 +381,7 @@ async def process_training_center(callback: CallbackQuery, state: FSMContext, **
                 contact=contact,
                 personal_number=personal_number,
                 training_center_id=center_id,
+                user_id=user_id,
                 application_date=now_str,
             )
         await callback.message.edit_text(
@@ -426,3 +403,164 @@ async def process_training_center(callback: CallbackQuery, state: FSMContext, **
         )
     await state.clear()
     await callback.answer()
+
+
+@router.callback_query(F.data == "exam_review_confirm", StateFilter(UserExam.review))
+async def confirm_exam_data(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при подтверждении записи на обучение")
+        await callback.message.answer(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]
+            ),
+        )
+        await callback.answer()
+        return
+
+    centers = await get_training_centers()
+    if not centers:
+        await callback.message.answer(
+            "Учебные центры не найдены. Обратитесь к администратору.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]
+            ),
+        )
+        logger.warning(
+            f"УТЦ не найдены для @{callback.from_user.username} (ID: {callback.from_user.id})"
+        )
+        await state.clear()
+        await callback.answer()
+        return
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=center["center_name"],
+                    callback_data=f"select_center_{center['id']}",
+                )
+            ]
+            for center in centers
+        ]
+    )
+    keyboard.inline_keyboard.append(
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
+    )
+    await callback.message.answer("Выберите учебный центр:", reply_markup=keyboard)
+    await state.set_state(UserExam.training_center)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "exam_review_back")
+async def back_to_exam_review(callback: CallbackQuery, state: FSMContext):
+    await _send_exam_review(callback.message, state)
+    await state.set_state(UserExam.review)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("exam_edit_"), StateFilter(UserExam.review))
+async def edit_exam_field(callback: CallbackQuery, state: FSMContext):
+    action = callback.data.split("exam_edit_")[-1]
+    prompts = {
+        "fio": "Введите ФИО:",
+        "personal_number": "Введите личный номер или жетон (например, АВ-449852):",
+        "military_unit": "Введите военную часть (например, В/Ч 29657):",
+        "subdivision": "Введите подразделение:",
+        "callsign": "Введите позывной:",
+        "specialty": "Введите направление (например, \"Север\", \"Юг\", \"Днепр\", \"Покровск\"):",
+        "contact": "Введите контакт для связи в Telegram:",
+    }
+    target_state = {
+        "fio": UserExam.fio,
+        "personal_number": UserExam.personal_number,
+        "military_unit": UserExam.military_unit,
+        "subdivision": UserExam.subdivision,
+        "callsign": UserExam.callsign,
+        "specialty": UserExam.specialty,
+        "contact": UserExam.contact,
+    }.get(action)
+
+    if not target_state:
+        logger.warning(f"Неизвестное поле редактирования: {action}")
+        await callback.answer("Неизвестное поле")
+        return
+
+    await state.update_data(return_to_review=True)
+    await callback.message.answer(
+        prompts[action],
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_review_back")]]
+        ),
+    )
+    await state.set_state(target_state)
+    await callback.answer()
+
+
+async def _send_exam_review(message: Message, state: FSMContext):
+    data = await state.get_data()
+    text = (
+        "Проверьте введенные данные:\n\n"
+        f"👤 ФИО: {data.get('fio', '—')}\n"
+        f"🎟 Личный номер/жетон: {data.get('personal_number', '—')}\n"
+        f"🏢 Военная часть: {data.get('military_unit', '—')}\n"
+        f"🏘 Подразделение: {data.get('subdivision', '—')}\n"
+        f"📡 Позывной: {data.get('callsign', '—')}\n"
+        f"🧭 Направление: {data.get('specialty', '—')}\n"
+        f"☎️ Контакт: {data.get('contact', '—')}\n"
+    )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтвердить", callback_data="exam_review_confirm")],
+            [InlineKeyboardButton(text="✏️ Редактировать ФИО", callback_data="exam_edit_fio")],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Редактировать номер/жетон",
+                    callback_data="exam_edit_personal_number",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Редактировать военную часть",
+                    callback_data="exam_edit_military_unit",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Редактировать подразделение",
+                    callback_data="exam_edit_subdivision",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Редактировать позывной",
+                    callback_data="exam_edit_callsign",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Редактировать направление",
+                    callback_data="exam_edit_specialty",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Редактировать контакт",
+                    callback_data="exam_edit_contact",
+                )
+            ],
+            [InlineKeyboardButton(text="⬅️ Отмена", callback_data="select_scenario")],
+        ]
+    )
+    await message.answer(text, reply_markup=keyboard)
+
+
+async def _maybe_return_to_review(message: Message, state: FSMContext) -> bool:
+    data = await state.get_data()
+    if data.get("return_to_review"):
+        await state.update_data(return_to_review=False)
+        await _send_exam_review(message, state)
+        await state.set_state(UserExam.review)
+        return True
+    return False

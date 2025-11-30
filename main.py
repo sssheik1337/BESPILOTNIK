@@ -2,6 +2,7 @@ import asyncio
 import logging
 from pathlib import Path
 from aiogram import Bot, Dispatcher, BaseMiddleware
+from aiogram.types import BotCommand, BotCommandScopeDefault, MenuButtonCommands
 from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -11,7 +12,7 @@ from aiogram.types import (
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
-from config import TOKEN, API_BASE_URL, WEBHOOK_URL, MAIN_ADMIN_IDS
+from config import TOKEN, API_BASE_URL, WEBHOOK_URL, MAIN_ADMIN_IDS, LOG_FILE_PATH
 from urllib.parse import quote
 
 from utils.storage import ensure_within_public_root, public_root
@@ -30,15 +31,13 @@ from database.db import initialize_db, close_db, get_open_appeals, close_appeal
 from aiogram.client.session.aiohttp import AiohttpSession
 from datetime import datetime
 
+log_path = Path(LOG_FILE_PATH)
+log_path.parent.mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(
-            "C:\\Users\\hrome\\PycharmProjects\\BESPILOTNIK\\bot_err.log"
-        ),
-    ],
+    handlers=[logging.StreamHandler(), logging.FileHandler(log_path)],
 )
 logging.getLogger("aiohttp.server").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -82,19 +81,12 @@ class SerialCheckMiddleware(BaseMiddleware):
             logger.debug("Нет внутреннего события в Update, пропускаем")
             return await handler(update, data)
 
-        if not hasattr(event, "chat"):
-            logger.debug(f"Пропускаем событие {type(event).__name__} без чата")
-            return await handler(update, data)
-
         user_id = None
         username = "неизвестно"
+
         if hasattr(event, "from_user") and event.from_user:
             user_id = event.from_user.id
             username = event.from_user.username or "неизвестно"
-
-        if user_id is None:
-            logger.debug("Не удалось определить user_id, пропускаем событие")
-            return await handler(update, data)
 
         state = data.get("state")
         if state is None:
@@ -118,30 +110,46 @@ class SerialCheckMiddleware(BaseMiddleware):
 
         logger.debug(f"SerialCheckMiddleware: Текущее состояние FSM: {current_state}")
 
-        is_fsm_state = current_state and (
-            current_state.startswith("UserState:")
-            or current_state.startswith("UserExam:")
-            or current_state.startswith("AppealForm:")
-            or current_state.startswith("AdminResponse:")
-            or current_state.startswith("BaseManagement:")
-            or current_state.startswith("ManualUpload:")
-        )
-        if is_fsm_state:
+        if current_state and current_state.startswith("VisitState:"):
             logger.debug(
-                f"Пропускаем сообщение в состоянии {current_state} для пользователя @{username} (ID: {user_id})"
+                "Передаём сообщение в VisitState без дополнительных проверок для пользователя @%s (ID: %s)",
+                username,
+                user_id,
             )
+            return await handler(update, data)
+
+        if not hasattr(event, "chat"):
+            logger.debug(f"Пропускаем событие {type(event).__name__} без чата")
+            return await handler(update, data)
+
+        user_id = None
+        username = "неизвестно"
+        if hasattr(event, "from_user") and event.from_user:
+            user_id = event.from_user.id
+            username = event.from_user.username or "неизвестно"
+
+        if user_id is None:
+            logger.debug("Не удалось определить user_id, пропускаем событие")
             return await handler(update, data)
 
         if isinstance(event, Message):
             if event.text and event.text.startswith("/"):
                 logger.debug(
-                    f"Обработка команды '{event.text}' от @{username} (ID: {user_id}) в чате типа {event.chat.type}"
+                    "Обработка команды '%s' от @%s (ID: %s) в чате типа %s",
+                    event.text,
+                    username,
+                    user_id,
+                    event.chat.type,
                 )
-                return await handler(update, data)
-            logger.debug(
-                f"Игнорируем сообщение '{event.text}' от @{username} (ID: {user_id}) в чате типа {event.chat.type}, не является командой"
-            )
-            return
+            else:
+                logger.debug(
+                    "Передаём текстовое сообщение '%s' от @%s (ID: %s) в чате типа %s",
+                    event.text,
+                    username,
+                    user_id,
+                    event.chat.type,
+                )
+            return await handler(update, data)
 
         if isinstance(event, CallbackQuery):
             logger.debug(
@@ -292,6 +300,13 @@ async def on_startup(app):
     dp.update.outer_middleware.register(SerialCheckMiddleware())
     asyncio.create_task(check_overdue_appeals(bot))
 
+    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    await bot.set_my_commands(
+        [BotCommand(command="start", description="Главное меню")],
+        scope=BotCommandScopeDefault(),
+    )
+    logger.info("Команды бота обновлены и кнопка меню установлена")
+
 
 async def on_shutdown(app):
     bot = app["bot"]
@@ -343,5 +358,6 @@ if __name__ == "__main__":
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[logging.StreamHandler(), logging.FileHandler(log_path)],
     )
     main()

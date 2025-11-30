@@ -183,6 +183,9 @@ async def create_tables():
         await conn.execute(
             "ALTER TABLE exam_records ADD COLUMN IF NOT EXISTS accepted_date TEXT"
         )
+        await conn.execute(
+            "ALTER TABLE exam_records ADD COLUMN IF NOT EXISTS user_id BIGINT"
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_messages (
                 message_id BIGINT,
@@ -198,6 +201,48 @@ async def create_tables():
                 file_name TEXT
             )
         """)
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS manuals_files (
+                id SERIAL PRIMARY KEY,
+                category TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                file_type TEXT NOT NULL DEFAULT 'document',
+                uploaded_at TIMESTAMPTZ DEFAULT NOW()
+            )
+            """
+        )
+        await conn.execute(
+            "ALTER TABLE manuals_files ADD COLUMN IF NOT EXISTS file_type TEXT NOT NULL DEFAULT 'document'"
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS visits (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                finished_at TIMESTAMPTZ DEFAULT NULL,
+                admin_tg_id BIGINT,
+                admin_username TEXT,
+                admin_first_name TEXT,
+                admin_last_name TEXT,
+                subdivision TEXT,
+                callsigns TEXT,
+                tasks TEXT,
+                media_type TEXT,
+                media_path TEXT
+            )
+            """
+        )
+        await conn.execute(
+            "ALTER TABLE visits ADD COLUMN IF NOT EXISTS admin_username TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE visits ADD COLUMN IF NOT EXISTS admin_first_name TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE visits ADD COLUMN IF NOT EXISTS admin_last_name TEXT"
+        )
         await conn.execute(
             "ALTER TABLE manuals ADD COLUMN IF NOT EXISTS file_name TEXT"
         )
@@ -220,6 +265,7 @@ async def add_exam_record(
     contact,
     personal_number,
     training_center_id,
+    user_id=None,
     video_link=None,
     photo_links=None,
     application_date=None,
@@ -237,8 +283,8 @@ async def add_exam_record(
         else:
             photo_links_payload = photo_links if photo_links else None
         exam_id = await conn.fetchval(
-            "INSERT INTO exam_records (fio, subdivision, military_unit, callsign, specialty, contact, personal_number, training_center_id, video_link, photo_links, normalized, application_date, accepted_date) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING exam_id",
+            "INSERT INTO exam_records (fio, subdivision, military_unit, callsign, specialty, contact, personal_number, training_center_id, video_link, photo_links, normalized, application_date, accepted_date, user_id) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING exam_id",
             fio,
             subdivision,
             military_unit,
@@ -252,6 +298,7 @@ async def add_exam_record(
             normalized,
             application_date,
             accepted_date,
+            user_id,
         )
         logger.info(
             f"Экзамен №{exam_id} добавлен для {fio} с УТЦ ID {training_center_id}"
@@ -465,6 +512,27 @@ async def get_training_centers():
         )
         logger.info(f"Запрошены УТЦ, найдено: {len(centers)}")
         return centers
+
+
+async def get_user_training_invite(user_id: int):
+    async with pool.acquire() as conn:
+        record = await conn.fetchrow(
+            """
+            SELECT er.training_center_id, tc.center_name, tc.chat_link
+            FROM exam_records er
+            LEFT JOIN training_centers tc ON er.training_center_id = tc.id
+            WHERE er.user_id = $1
+            ORDER BY er.exam_id DESC
+            LIMIT 1
+            """,
+            user_id,
+        )
+        logger.info(
+            "Запрошена последняя запись обучения для пользователя ID %s: %s",
+            user_id,
+            "найдена" if record else "не найдена",
+        )
+        return record
 
 
 async def get_code_word():
@@ -922,6 +990,159 @@ async def get_defect_reports(serial=None, serial_from=None, serial_to=None):
         return reports
 
 
+async def add_visit(
+    pool,
+    admin_tg_id: int,
+    subdivision: str,
+    callsigns: str,
+    tasks: str,
+    media_type: str | None,
+    media_path: str | None,
+    *,
+    admin_username: str | None = None,
+    admin_first_name: str | None = None,
+    admin_last_name: str | None = None,
+) -> int:
+    async with pool.acquire() as conn:
+        visit_id = await conn.fetchval(
+            """
+            INSERT INTO visits (
+                admin_tg_id,
+                admin_username,
+                admin_first_name,
+                admin_last_name,
+                subdivision,
+                callsigns,
+                tasks,
+                media_type,
+                media_path
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING id
+            """,
+            admin_tg_id,
+            admin_username,
+            admin_first_name,
+            admin_last_name,
+            subdivision,
+            callsigns,
+            tasks,
+            media_type,
+            media_path,
+        )
+        logger.info(
+            "Добавлен визит ID %s для администратора/сотрудника %s (подразделение: %s)",
+            visit_id,
+            admin_tg_id,
+            subdivision,
+        )
+        return visit_id
+
+
+async def finish_visit(pool, visit_id: int) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE visits SET finished_at = NOW() WHERE id = $1",
+            visit_id,
+        )
+        logger.info("Визит ID %s завершён", visit_id)
+
+
+async def get_visits(
+    pool,
+    *,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    admin_tg_id: int | None = None,
+) -> list[asyncpg.Record]:
+    conditions = []
+    params = []
+
+    if date_from:
+        conditions.append(f"created_at >= ${len(params) + 1}")
+        params.append(date_from)
+    if date_to:
+        conditions.append(f"created_at <= ${len(params) + 1}")
+        params.append(date_to)
+    if admin_tg_id is not None:
+        conditions.append(f"admin_tg_id = ${len(params) + 1}")
+        params.append(admin_tg_id)
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    async with pool.acquire() as conn:
+        visits = await conn.fetch(
+            f"""
+            SELECT *
+            FROM visits
+            {where_clause}
+            ORDER BY created_at DESC
+            """,
+            *params,
+        )
+        logger.info(
+            "Запрошены визиты (фильтры: дата с %s по %s, админ %s), найдено: %d",
+            date_from,
+            date_to,
+            admin_tg_id,
+            len(visits),
+        )
+        return visits
+
+
+async def get_visits_for_export(
+    pool,
+) -> list[asyncpg.Record]:
+    async with pool.acquire() as conn:
+        visits = await conn.fetch(
+            """
+            SELECT *
+            FROM visits
+            ORDER BY finished_at DESC NULLS LAST, created_at DESC
+            """,
+        )
+        logger.info(
+            "Запрошены все визиты для экспорта, найдено: %d",
+            len(visits),
+        )
+        return visits
+
+
+async def normalize_visit_media_paths(pool) -> None:
+    """Преобразует сохранённые файловые пути медиа визитов в публичные URL."""
+
+    from pathlib import Path
+
+    from config import PUBLIC_MEDIA_ROOT
+    from utils.storage import build_public_url
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, media_path FROM visits WHERE media_path IS NOT NULL"
+        )
+        for row in rows:
+            raw_path = row["media_path"]
+            if not raw_path:
+                continue
+
+            normalized = raw_path.replace("\\", "/")
+            if normalized.startswith("http://") or normalized.startswith("https://"):
+                continue
+
+            candidate = Path(PUBLIC_MEDIA_ROOT) / normalized
+            try:
+                public_url = build_public_url(candidate)
+            except ValueError:
+                continue
+
+            await conn.execute(
+                "UPDATE visits SET media_path = $1 WHERE id = $2",
+                public_url,
+                row["id"],
+            )
+            logger.debug("Обновлён путь медиа визита %s -> %s", raw_path, public_url)
+
+
 async def set_manual_file(category, file_name):
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -957,3 +1178,70 @@ async def get_manual_file(category):
             f"Запрошен файл руководства '{category}': {'найден' if has_record else 'отсутствует'}"
         )
         return dict(record) if record else None
+
+
+async def add_manual_file(
+    category: str, file_name: str, file_path: str, file_type: str
+) -> int:
+    async with pool.acquire() as conn:
+        record = await conn.fetchrow(
+            """
+            INSERT INTO manuals_files (category, file_name, file_path, file_type, uploaded_at)
+            VALUES ($1, $2, $3, $4, NOW())
+            RETURNING id
+            """,
+            category,
+            file_name,
+            file_path,
+            file_type,
+        )
+        logger.info("Добавлен файл руководства %s (%s)", category, file_name)
+        return record["id"]
+
+
+async def get_manual_files(category: str):
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, category, file_name, file_path, file_type, uploaded_at
+            FROM manuals_files
+            WHERE category = $1
+            ORDER BY id ASC
+            """,
+            category,
+        )
+        logger.debug(
+            "Запрошен список файлов руководства %s: %s шт.", category, len(rows)
+        )
+        return rows
+
+
+async def get_manual_file_by_id(file_id: int):
+    async with pool.acquire() as conn:
+        record = await conn.fetchrow(
+            """
+            SELECT id, category, file_name, file_path, file_type, uploaded_at
+            FROM manuals_files
+            WHERE id = $1
+            """,
+            file_id,
+        )
+        if record:
+            logger.debug(
+                "Найден файл руководства id=%s (%s)", file_id, record["file_name"]
+            )
+        else:
+            logger.debug("Файл руководства id=%s не найден", file_id)
+        return record
+
+
+async def delete_manual_file(file_id: int) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM manuals_files WHERE id = $1", file_id)
+        logger.info("Файл руководства id=%s удалён", file_id)
+
+
+async def delete_all_manual_files(category: str) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM manuals_files WHERE category = $1", category)
+        logger.info("Удалены все файлы руководства категории %s", category)
