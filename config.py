@@ -13,27 +13,26 @@ LOCAL_BOT_API_REMOTE_DIR = os.getenv("LOCAL_BOT_API_REMOTE_DIR", "/var/lib/teleg
 LOCAL_BOT_API_DATA_DIR = os.getenv("LOCAL_BOT_API_DATA_DIR")
 # Каталог для локального кеша загруженных файлов (используется для сжатия видео и резервных копий)
 LOCAL_BOT_API_CACHE_DIR = os.getenv("LOCAL_BOT_API_CACHE_DIR", "data/telegram_files")
-# Путь к файлу логов бота
-LOG_FILE_PATH = os.getenv("LOG_FILE_PATH", f"{LOCAL_BOT_API_CACHE_DIR}/bot_err.log")
 NGROK_PUBLIC_URL = os.getenv("NGROK_PUBLIC_URL", "https://10bdf31051e0.ngrok-free.app")  # Замени на адрес от ngrok
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", f"{NGROK_PUBLIC_URL.rstrip('/')}{WEBHOOK_PATH}")
 PUBLIC_MEDIA_ROOT = os.getenv("PUBLIC_MEDIA_ROOT", "data")
-PUBLIC_MEDIA_URL = os.getenv("PUBLIC_MEDIA_URL", f"{NGROK_PUBLIC_URL.rstrip('/')}/files")
-EXAM_MEDIA_ROOT = os.getenv("EXAM_MEDIA_ROOT", f"{PUBLIC_MEDIA_ROOT}/exams")
-EXAM_VIDEOS_DIR = os.getenv("EXAM_VIDEOS_DIR", f"{EXAM_MEDIA_ROOT}/videos")
-EXAM_PHOTOS_DIR = os.getenv("EXAM_PHOTOS_DIR", f"{EXAM_MEDIA_ROOT}/photos")
-DEFECT_MEDIA_DIR = os.getenv("DEFECT_MEDIA_DIR", f"{PUBLIC_MEDIA_ROOT}/defects")
-MANUALS_STORAGE_DIR = os.getenv("MANUALS_STORAGE_DIR", f"{PUBLIC_MEDIA_ROOT}/manuals")
-VISITS_MEDIA_DIR = os.getenv("VISITS_MEDIA_DIR", f"{PUBLIC_MEDIA_ROOT}/visits")
-API_BASE_URL = os.getenv("API_BASE_URL", f"{LOCAL_BOT_API_HOST}/bot{{token}}/")
-API_FILE_BASE_URL = os.getenv("API_FILE_BASE_URL", f"{LOCAL_BOT_API_HOST}/file/bot{{token}}/")
+
+WEBHOOK_URL = f"{NGROK_PUBLIC_URL.rstrip('/')}{WEBHOOK_PATH}"
+PUBLIC_MEDIA_URL = f"{NGROK_PUBLIC_URL.rstrip('/')}/files"
+EXAM_MEDIA_ROOT = f"{PUBLIC_MEDIA_ROOT}/exams"
+EXAM_VIDEOS_DIR = f"{EXAM_MEDIA_ROOT}/videos"
+EXAM_PHOTOS_DIR = f"{EXAM_MEDIA_ROOT}/photos"
+DEFECT_MEDIA_DIR = f"{PUBLIC_MEDIA_ROOT}/defects"
+MANUALS_STORAGE_DIR = f"{PUBLIC_MEDIA_ROOT}/manuals"
+VISITS_MEDIA_DIR = f"{PUBLIC_MEDIA_ROOT}/visits"
+API_BASE_URL = f"{LOCAL_BOT_API_HOST.rstrip('/')}/bot{{token}}/"
+API_FILE_BASE_URL = f"{LOCAL_BOT_API_HOST.rstrip('/')}/file/bot{{token}}/"
+LOG_FILE_PATH = f"{LOCAL_BOT_API_CACHE_DIR}/bot_err.log"
 MAIN_ADMIN_IDS = [
     int(admin_id)
     for admin_id in os.getenv("MAIN_ADMIN_IDS", "7797651918").split(",")
     if admin_id.strip().isdigit()
 ]
-DB_PATH = os.getenv("DB_PATH", "/data/bot.db")  # Путь к SQLite базе
 
 DB_CONFIG = {
     "user": os.getenv("POSTGRES_USER", "пользователь"),
