@@ -2,6 +2,7 @@ import asyncio
 import logging
 from pathlib import Path
 from aiogram import Bot, Dispatcher, BaseMiddleware
+from aiogram.types import BotCommand, BotCommandScopeDefault, MenuButtonCommands
 from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -298,6 +299,13 @@ async def on_startup(app):
     dp.update.outer_middleware.register(DatabaseMiddleware(pool))
     dp.update.outer_middleware.register(SerialCheckMiddleware())
     asyncio.create_task(check_overdue_appeals(bot))
+
+    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    await bot.set_my_commands(
+        [BotCommand(command="start", description="Главное меню")],
+        scope=BotCommandScopeDefault(),
+    )
+    logger.info("Команды бота обновлены и кнопка меню установлена")
 
 
 async def on_shutdown(app):
