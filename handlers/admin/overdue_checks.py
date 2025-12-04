@@ -13,9 +13,9 @@ from database.db import get_appeal, get_db_pool
 from config import MAIN_ADMIN_IDS
 from utils.statuses import APPEAL_STATUSES
 import asyncio
-import logging
+from utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = Router()
 

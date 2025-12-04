@@ -11,9 +11,10 @@ from aiogram.filters import StateFilter
 from database.db import get_serial_history
 from utils.validators import validate_serial
 from config import MAIN_ADMIN_IDS
-import logging
 
-logger = logging.getLogger(__name__)
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = Router()
 

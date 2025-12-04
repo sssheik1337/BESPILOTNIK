@@ -65,7 +65,6 @@ from config import (
     PUBLIC_MEDIA_ROOT,
 )
 from datetime import datetime
-import logging
 from aiogram.exceptions import TelegramBadRequest
 from io import BytesIO
 import pandas as pd
@@ -78,6 +77,7 @@ from utils.validators import (
     is_valid_callsign,
 )
 from utils.statuses import APPEAL_STATUSES
+from utils.logger import get_logger
 from utils.video import compress_video
 from utils.storage import build_public_url
 from utils.excel_utils import export_visits_to_excel
@@ -87,9 +87,51 @@ import shutil
 from pathlib import PurePosixPath
 import re
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = Router()
+
+
+# Вспомогательная функция для проверки прав администратора в экзаменационных хендлерах
+async def _ensure_exam_admin_access(event, data, back_callback: str = "main_menu"):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        reply_markup = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)]]
+        )
+        if isinstance(event, CallbackQuery):
+            await event.message.edit_text(
+                "Ошибка сервера. Попробуйте позже.", reply_markup=reply_markup
+            )
+            await event.answer()
+        else:
+            await event.answer(
+                "Ошибка сервера. Попробуйте позже.", reply_markup=reply_markup
+            )
+        logger.error(
+            "db_pool отсутствует в data при обработке экзаменационного запроса"
+        )
+        return None
+
+    admin = await _fetch_admin_record(db_pool, event.from_user.id)
+    if not admin:
+        reply_markup = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)]]
+        )
+        if isinstance(event, CallbackQuery):
+            await event.message.edit_text(
+                "Доступ запрещён.", reply_markup=reply_markup
+            )
+            await event.answer()
+        else:
+            await event.answer("Доступ запрещён.", reply_markup=reply_markup)
+        logger.warning(
+            "Попытка доступа к экзаменационной логике без прав от пользователя @%s",
+            event.from_user.username,
+        )
+        return None
+
+    return admin
 
 
 class LocalBotAPIConfigurationError(RuntimeError):
@@ -1283,18 +1325,9 @@ async def visit_export_handler(callback: CallbackQuery, **data):
 
 @router.callback_query(F.data.startswith("select_exam_"))
 async def select_exam_record(callback: CallbackQuery, state: FSMContext, **data):
-    db_pool = data.get("db_pool")
-    if not db_pool:
-        logger.error("db_pool отсутствует в data")
-        await callback.message.edit_text(
-            "Ошибка сервера. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
-                ]
-            ),
-        )
+    if not await _ensure_exam_admin_access(callback, data):
         return
+    db_pool = data["db_pool"]
     exam_id = int(callback.data.split("_")[-1])
     async with db_pool.acquire() as conn:
         record = await conn.fetchrow(
@@ -1351,7 +1384,9 @@ async def select_exam_record(callback: CallbackQuery, state: FSMContext, **data)
 
 
 @router.callback_query(F.data == "new_exam_record")
-async def new_exam_record(callback: CallbackQuery, state: FSMContext):
+async def new_exam_record(callback: CallbackQuery, state: FSMContext, **data):
+    if not await _ensure_exam_admin_access(callback, data):
+        return
     await state.update_data(exam_id=None)  # Очищаем exam_id для новой записи
     await callback.message.edit_text(
         "Введите военную часть (например, В/Ч 29657):",
@@ -1369,17 +1404,7 @@ async def new_exam_record(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "exam_menu")
 async def exam_menu_prompt(callback: CallbackQuery, **data):
-    db_pool = data.get("db_pool")
-    if not db_pool:
-        logger.error("db_pool отсутствует в data")
-        await callback.message.edit_text(
-            "Ошибка сервера. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-                ]
-            ),
-        )
+    if not await _ensure_exam_admin_access(callback, data):
         return
     await callback.message.edit_text("Меню экзаменов:", reply_markup=get_exam_menu())
     logger.debug(
@@ -1389,14 +1414,7 @@ async def exam_menu_prompt(callback: CallbackQuery, **data):
 
 @router.callback_query(F.data == "delete_exam")
 async def delete_exam_prompt(callback: CallbackQuery, state: FSMContext, **data):
-    db_pool = data.get("db_pool")
-    if not db_pool:
-        logger.error("db_pool отсутствует в data")
-        await callback.message.edit_text(
-            "Ошибка сервера. Попробуйте позже.",
-            reply_markup=_exam_back_markup("main_menu"),
-        )
-        await callback.answer()
+    if not await _ensure_exam_admin_access(callback, data):
         return
     await callback.message.edit_text(
         "Введите данные для поиска экзамена (личный номер, военная часть, подразделение, позывной или направление):",
@@ -1417,6 +1435,8 @@ async def delete_exam_prompt(callback: CallbackQuery, state: FSMContext, **data)
     )
 )
 async def process_exam_delete_search(message: Message, state: FSMContext, **data):
+    if not await _ensure_exam_admin_access(message, data, back_callback="delete_exam_cancel"):
+        return
     query = (message.text or "").strip()
     if not query:
         await message.answer(
@@ -1490,6 +1510,8 @@ async def process_exam_delete_search(message: Message, state: FSMContext, **data
     StateFilter(AdminResponse.exam_delete_selection),
 )
 async def exam_delete_select(callback: CallbackQuery, state: FSMContext, **data):
+    if not await _ensure_exam_admin_access(callback, data, back_callback="delete_exam_cancel"):
+        return
     exam_id = int(callback.data.split("_")[-1])
     record = await get_exam_record_by_id(exam_id)
     if not record:
@@ -1543,6 +1565,8 @@ async def exam_delete_select(callback: CallbackQuery, state: FSMContext, **data)
     StateFilter(AdminResponse.exam_delete_confirmation),
 )
 async def exam_delete_confirm(callback: CallbackQuery, state: FSMContext, **data):
+    if not await _ensure_exam_admin_access(callback, data, back_callback="delete_exam_cancel"):
+        return
     exam_id = int(callback.data.split("_")[-1])
     state_data = await state.get_data()
     if state_data.get("selected_exam_id") != exam_id:
@@ -1600,7 +1624,9 @@ async def exam_delete_cancel(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "take_exam")
-async def take_exam_prompt(callback: CallbackQuery, state: FSMContext):
+async def take_exam_prompt(callback: CallbackQuery, state: FSMContext, **data):
+    if not await _ensure_exam_admin_access(callback, data):
+        return
     await callback.message.edit_text(
         "⚠️ Внимание!\n"
         "Продолжая использовать бот, вы автоматически соглашаетесь с обработкой ваших персональных данных.\n"
@@ -1618,7 +1644,9 @@ async def take_exam_prompt(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(StateFilter(AdminResponse.exam_fio))
-async def process_exam_fio(message: Message, state: FSMContext):
+async def process_exam_fio(message: Message, state: FSMContext, **data):
+    if not await _ensure_exam_admin_access(message, data):
+        return
     fio = message.text.strip()
     await state.update_data(fio=fio)
     await message.answer(
@@ -1639,6 +1667,8 @@ async def process_exam_fio(message: Message, state: FSMContext):
 async def process_personal_number(
     message: Message, state: FSMContext, bot: Bot, **data
 ):
+    if not await _ensure_exam_admin_access(message, data):
+        return
     personal_number = message.text.strip()
     if not is_valid_personal_number(personal_number):
         await message.answer(
@@ -1733,7 +1763,9 @@ async def process_personal_number(
 
 
 @router.message(StateFilter(AdminResponse.exam_military_unit))
-async def process_exam_military_unit(message: Message, state: FSMContext):
+async def process_exam_military_unit(message: Message, state: FSMContext, **data):
+    if not await _ensure_exam_admin_access(message, data):
+        return
     military_unit = message.text.strip()
     if not is_valid_military_unit(military_unit):
         await message.answer(
@@ -1762,7 +1794,9 @@ async def process_exam_military_unit(message: Message, state: FSMContext):
 
 
 @router.message(StateFilter(AdminResponse.exam_subdivision))
-async def process_exam_subdivision(message: Message, state: FSMContext):
+async def process_exam_subdivision(message: Message, state: FSMContext, **data):
+    if not await _ensure_exam_admin_access(message, data):
+        return
     subdivision = message.text.strip()
     if not is_valid_subdivision(subdivision):
         await message.answer(
@@ -1791,7 +1825,9 @@ async def process_exam_subdivision(message: Message, state: FSMContext):
 
 
 @router.message(StateFilter(AdminResponse.exam_callsign))
-async def process_exam_callsign(message: Message, state: FSMContext):
+async def process_exam_callsign(message: Message, state: FSMContext, **data):
+    if not await _ensure_exam_admin_access(message, data):
+        return
     callsign = message.text.strip()
     if not is_valid_callsign(callsign):
         await message.answer(
@@ -1820,7 +1856,9 @@ async def process_exam_callsign(message: Message, state: FSMContext):
 
 
 @router.message(StateFilter(AdminResponse.exam_specialty))
-async def process_exam_specialty(message: Message, state: FSMContext):
+async def process_exam_specialty(message: Message, state: FSMContext, **data):
+    if not await _ensure_exam_admin_access(message, data):
+        return
     specialty = message.text.strip()
     await state.update_data(specialty=specialty)
     await message.answer(
@@ -1836,6 +1874,8 @@ async def process_exam_specialty(message: Message, state: FSMContext):
 
 @router.message(StateFilter(AdminResponse.exam_contact))
 async def process_exam_contact(message: Message, state: FSMContext, **data):
+    if not await _ensure_exam_admin_access(message, data):
+        return
     contact = message.text.strip()
     await state.update_data(contact=contact)
     db_pool = data.get("db_pool")
@@ -1892,19 +1932,9 @@ async def process_exam_contact(message: Message, state: FSMContext, **data):
 
 @router.message(StateFilter(AdminResponse.exam_video), F.video)
 async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **data):
-    db_pool = data.get("db_pool")
-    if not db_pool:
-        logger.error("db_pool отсутствует в data")
-        await message.answer(
-            "Ошибка сервера. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
-                ]
-            ),
-        )
-        await state.clear()
+    if not await _ensure_exam_admin_access(message, data):
         return
+    db_pool = data["db_pool"]
 
     download_result: Optional[DownloadResult] = None
 
@@ -2049,6 +2079,8 @@ async def process_exam_video(message: Message, state: FSMContext, bot: Bot, **da
 
 @router.message(StateFilter(AdminResponse.exam_photo))
 async def process_exam_photo(message: Message, state: FSMContext, **data):
+    if not await _ensure_exam_admin_access(message, data):
+        return
     data_state = await state.get_data()
     photo_links = data_state.get("photo_links", [])
     db_pool = data.get("db_pool")
@@ -2201,19 +2233,9 @@ async def process_training_center(callback: CallbackQuery, state: FSMContext, **
 
 @router.callback_query(F.data == "finish_exam")
 async def finish_exam(callback: CallbackQuery, state: FSMContext, **data):
-    db_pool = data.get("db_pool")
-    if not db_pool:
-        logger.error("db_pool отсутствует в data")
-        await callback.message.edit_text(
-            "Ошибка сервера. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_menu")]
-                ]
-            ),
-        )
-        await state.clear()
+    if not await _ensure_exam_admin_access(callback, data):
         return
+    db_pool = data["db_pool"]
 
     try:
         state_data = await state.get_data()
@@ -3653,7 +3675,9 @@ async def process_defect_media(message: Message, state: FSMContext):
 
 
 @router.callback_query(F.data == "done_exam_video")
-async def skip_exam_video(callback: CallbackQuery, state: FSMContext):
+async def skip_exam_video(callback: CallbackQuery, state: FSMContext, **data):
+    if not await _ensure_exam_admin_access(callback, data):
+        return
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Готово", callback_data="done_exam_photo")],
@@ -3670,7 +3694,9 @@ async def skip_exam_video(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "done_exam_photo")
-async def skip_exam_photo(callback: CallbackQuery, state: FSMContext):
+async def skip_exam_photo(callback: CallbackQuery, state: FSMContext, **data):
+    if not await _ensure_exam_admin_access(callback, data):
+        return
     data_state = await state.get_data()
     fio = data_state.get("fio", "Не указано")
     subdivision = data_state.get("subdivision", "Не указано")
@@ -3704,7 +3730,9 @@ async def skip_exam_photo(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "cancel_exam")
-async def cancel_exam(callback: CallbackQuery, state: FSMContext):
+async def cancel_exam(callback: CallbackQuery, state: FSMContext, **data):
+    if not await _ensure_exam_admin_access(callback, data):
+        return
     await state.clear()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -3717,18 +3745,9 @@ async def cancel_exam(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "submit_exam")
 async def submit_exam(callback: CallbackQuery, state: FSMContext, **data):
-    db_pool = data.get("db_pool")
-    if not db_pool:
-        logger.error("db_pool отсутствует в data")
-        await callback.message.edit_text(
-            "Ошибка сервера. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_base")]
-                ]
-            ),
-        )
+    if not await _ensure_exam_admin_access(callback, data):
         return
+    db_pool = data["db_pool"]
     data_state = await state.get_data()
     fio = data_state.get("fio", "")
     subdivision = data_state.get("subdivision", "")

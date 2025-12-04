@@ -12,10 +12,11 @@ from aiogram.types import (
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
-from config import TOKEN, API_BASE_URL, WEBHOOK_URL, MAIN_ADMIN_IDS, LOG_FILE_PATH
+from config import TOKEN, API_BASE_URL, WEBHOOK_URL, MAIN_ADMIN_IDS
 from urllib.parse import quote
 
 from utils.storage import ensure_within_public_root, public_root
+from utils.logger import get_logger
 from handlers import user_handlers, common_handlers, user_exam
 from handlers.admin import (
     serial_history,
@@ -31,16 +32,8 @@ from database.db import initialize_db, close_db, get_open_appeals, close_appeal
 from aiogram.client.session.aiohttp import AiohttpSession
 from datetime import datetime
 
-log_path = Path(LOG_FILE_PATH)
-log_path.parent.mkdir(parents=True, exist_ok=True)
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler(log_path)],
-)
+logger = get_logger(__name__)
 logging.getLogger("aiohttp.server").setLevel(logging.WARNING)
-logger = logging.getLogger(__name__)
 
 db_lock = asyncio.Lock()
 
@@ -352,12 +345,4 @@ def main():
 
 
 if __name__ == "__main__":
-    from aiogram.client.session.aiohttp import AiohttpSession
-    from aiohttp import web
-
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.StreamHandler(), logging.FileHandler(log_path)],
-    )
     main()

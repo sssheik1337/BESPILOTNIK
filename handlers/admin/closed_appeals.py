@@ -3,9 +3,10 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardBut
 from database.db import get_closed_appeals, get_appeal
 from utils.statuses import APPEAL_STATUSES
 from datetime import datetime
-import logging
 
-logger = logging.getLogger(__name__)
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = Router()
 

@@ -12,7 +12,9 @@ LOCAL_BOT_API_REMOTE_DIR = os.getenv("LOCAL_BOT_API_REMOTE_DIR", "/var/lib/teleg
 # LOCAL_BOT_API_DATA_DIR = r"C:\\TelegramBotApiData"
 LOCAL_BOT_API_DATA_DIR = os.getenv("LOCAL_BOT_API_DATA_DIR")
 # Каталог для локального кеша загруженных файлов (используется для сжатия видео и резервных копий)
-LOCAL_BOT_API_CACHE_DIR = os.getenv("LOCAL_BOT_API_CACHE_DIR", "data/telegram_files")
+LOCAL_BOT_API_CACHE_DIR = os.getenv(
+    "LOCAL_BOT_API_CACHE_DIR", "/opt/bespilotnik/data/telegram_files"
+)
 NGROK_PUBLIC_URL = os.getenv("NGROK_PUBLIC_URL", "https://10bdf31051e0.ngrok-free.app")  # Замени на адрес от ngrok
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 PUBLIC_MEDIA_ROOT = os.getenv("PUBLIC_MEDIA_ROOT", "data")
@@ -27,7 +29,6 @@ MANUALS_STORAGE_DIR = f"{PUBLIC_MEDIA_ROOT}/manuals"
 VISITS_MEDIA_DIR = f"{PUBLIC_MEDIA_ROOT}/visits"
 API_BASE_URL = f"{LOCAL_BOT_API_HOST.rstrip('/')}/bot{{token}}/"
 API_FILE_BASE_URL = f"{LOCAL_BOT_API_HOST.rstrip('/')}/file/bot{{token}}/"
-LOG_FILE_PATH = f"{LOCAL_BOT_API_CACHE_DIR}/bot_err.log"
 MAIN_ADMIN_IDS = [
     int(admin_id)
     for admin_id in os.getenv("MAIN_ADMIN_IDS", "7797651918").split(",")
