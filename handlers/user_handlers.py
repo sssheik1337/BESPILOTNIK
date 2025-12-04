@@ -29,11 +29,11 @@ from database.db import (
 from datetime import datetime
 import json
 from config import MAIN_ADMIN_IDS
-import logging
+from utils.logger import get_logger
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from handlers.common_handlers import UserState, get_start_media
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = Router()
 

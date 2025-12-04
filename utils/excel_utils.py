@@ -2,10 +2,12 @@ import pandas as pd
 import re
 from io import BytesIO
 from datetime import datetime
-import logging
+from pathlib import Path
 from zipfile import BadZipFile
 
-logger = logging.getLogger(__name__)
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def validate_serial(serial):
@@ -17,11 +19,13 @@ async def import_serials(file_io, db_pool):
         if hasattr(file_io, "seek"):
             file_io.seek(0)
         df = pd.read_excel(file_io, engine="openpyxl")
-        if "Serial" not in df.columns:
+        columns_map = {col.lower(): col for col in df.columns}
+        if "serial" not in columns_map:
             logger.error("Отсутствует столбец 'Serial' в загруженном файле")
             return None, "Файл должен содержать столбец 'Serial'.", None
 
-        serials = df["Serial"].dropna().astype(str).tolist()
+        serial_column = columns_map["serial"]
+        serials = df[serial_column].dropna().astype(str).tolist()
 
         result = {"added": 0, "skipped": 0, "invalid": []}
         existing_serials = set()
@@ -148,4 +152,52 @@ async def export_serials(db_pool):
         return output
     except Exception as e:
         logger.error(f"Ошибка при экспорте серийных номеров: {str(e)}")
+        return None
+
+
+async def export_visits_to_excel(visits: list, file_path: Path) -> Path:
+    """Экспортирует визиты сотрудников в Excel-файл по переданному пути."""
+
+    try:
+        data = []
+        for visit in visits:
+            created_at = visit.get("created_at")
+            finished_at = visit.get("finished_at")
+            visit_time = finished_at or created_at
+            visit_time_fmt = (
+                visit_time.strftime("%d.%m.%Y %H:%M") if visit_time else ""
+            )
+
+            admin_parts = [str(visit.get("admin_tg_id", ""))]
+            username = visit.get("admin_username")
+            if username:
+                admin_parts.append(f"@{username}")
+            full_name = " ".join(
+                filter(None, [visit.get("admin_first_name"), visit.get("admin_last_name")])
+            ).strip()
+            if full_name:
+                admin_parts.append(full_name)
+            admin_display = " | ".join(filter(None, admin_parts))
+
+            media_link = visit.get("media_path") or ""
+            data.append(
+                {
+                    "Дата/время визита": visit_time_fmt,
+                    "Администратор": admin_display,
+                    "Подразделение": visit.get("subdivision", ""),
+                    "Позывные": visit.get("callsigns", ""),
+                    "Задачи": visit.get("tasks", ""),
+                    "Тип медиа": visit.get("media_type", ""),
+                    "Ссылка на медиа": media_link,
+                }
+            )
+
+        df = pd.DataFrame(data)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_excel(file_path, index=False)
+
+        logger.info("Файл экспорта визитов успешно создан: %s", file_path)
+        return file_path
+    except Exception as e:
+        logger.error("Ошибка при экспорте визитов: %s", e)
         return None

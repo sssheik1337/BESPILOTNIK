@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import os
 import subprocess
 from pathlib import Path
@@ -8,8 +7,9 @@ from typing import Optional
 
 import ffmpeg
 
+from utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class _FFmpegExecutionError(RuntimeError):

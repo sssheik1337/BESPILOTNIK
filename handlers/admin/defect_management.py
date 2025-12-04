@@ -12,10 +12,11 @@ from keyboards.inline import get_defect_status_menu
 from database.db import get_appeal, add_defect_report, mark_defect
 from utils.validators import validate_serial, validate_media
 from datetime import datetime
-import logging
 import json
 
-logger = logging.getLogger(__name__)
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = Router()
 

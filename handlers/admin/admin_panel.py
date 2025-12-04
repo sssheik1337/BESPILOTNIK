@@ -23,6 +23,7 @@ from keyboards.inline import (
     get_my_appeals_menu,
     get_exam_menu,
     get_training_centers_menu,
+    get_visits_menu,
 )
 from database.db import (
     add_admin,
@@ -44,6 +45,10 @@ from database.db import (
     add_training_center,
     get_exam_records_by_personal_number,
     search_exam_records,
+    add_visit,
+    finish_visit,
+    get_visits_for_export,
+    normalize_visit_media_paths,
 )
 from config import (
     MAIN_ADMIN_IDS,
@@ -56,9 +61,10 @@ from config import (
     EXAM_VIDEOS_DIR,
     EXAM_PHOTOS_DIR,
     DEFECT_MEDIA_DIR,
+    VISITS_MEDIA_DIR,
+    PUBLIC_MEDIA_ROOT,
 )
 from datetime import datetime
-import logging
 from aiogram.exceptions import TelegramBadRequest
 from io import BytesIO
 import pandas as pd
@@ -73,13 +79,15 @@ from utils.validators import (
 from utils.statuses import APPEAL_STATUSES
 from utils.video import compress_video
 from utils.storage import build_public_url
+from utils.excel_utils import export_visits_to_excel
+from utils.logger import get_logger
 import aiohttp
 from aiohttp import ClientError
 import shutil
 from pathlib import PurePosixPath
 import re
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = Router()
 
@@ -125,6 +133,14 @@ class AdminResponse(StatesGroup):
     add_training_center_name = State()
     add_training_center_link = State()
     edit_training_center_link = State()
+
+
+class VisitState(StatesGroup):
+    subdivision = State()
+    callsigns = State()
+    tasks = State()
+    media = State()
+    review = State()
 
 
 COLON_VARIANTS = (":", "\uf03a", "\uff1a", "\ufe55", "\ufe13", "\u2236")
@@ -176,6 +192,20 @@ def _sanitize_filename_component(value: str) -> str:
     return cleaned or "media"
 
 
+async def _fetch_admin_record(db_pool, user_id: int):
+    async with db_pool.acquire() as conn:
+        record = await conn.fetchrow("SELECT * FROM admins WHERE admin_id = $1", user_id)
+    if record:
+        return record
+    if user_id in MAIN_ADMIN_IDS:
+        return {
+            "admin_id": user_id,
+            "username": None,
+            "is_main_admin": True,
+        }
+    return None
+
+
 def _exam_back_markup(callback: str = "exam_menu") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=callback)]]
@@ -196,6 +226,144 @@ def _ensure_unique_media_path(directory: Path, base_name: str, suffix: str) -> P
         candidate = directory / f"{base_name}_{counter}{suffix}"
         counter += 1
     return candidate
+
+
+def _visit_media_basename(subdivision: str, callsigns: str, admin_id: int) -> str:
+    subdivision_component = _sanitize_filename_component(subdivision or "visit")
+    callsigns_component = _sanitize_filename_component(callsigns or "calls")
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    return "_".join(
+        part for part in [subdivision_component, callsigns_component, str(admin_id), timestamp] if part
+    )
+
+
+def _relative_media_path(target: Path) -> str:
+    public_root = Path(PUBLIC_MEDIA_ROOT).resolve()
+    target_path = target.resolve()
+    try:
+        return str(target_path.relative_to(public_root))
+    except ValueError:
+        return str(target)
+
+
+def _visit_media_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="➡️ Пропустить", callback_data="visit_skip")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_visits")],
+        ]
+    )
+
+
+def _visit_review_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💾 Сохранить визит", callback_data="visit_save")],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Редактировать подразделение",
+                    callback_data="visit_edit_subdivision",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Редактировать позывные",
+                    callback_data="visit_edit_callsigns",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Редактировать задачи",
+                    callback_data="visit_edit_tasks",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Редактировать медиа",
+                    callback_data="visit_edit_media",
+                )
+            ],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="visit_cancel")],
+        ]
+    )
+
+
+def _format_admin_display(user) -> str:
+    parts = [str(user.id)]
+    if user.username:
+        parts.append(f"@{user.username}")
+    full_name = " ".join(filter(None, [user.first_name, user.last_name])).strip()
+    if full_name:
+        parts.append(full_name)
+    return " | ".join(parts)
+
+
+def _build_visit_preview_text(state_data: dict, user) -> str:
+    visit_time = state_data.get("finished_at") or state_data.get("started_at")
+    visit_time = visit_time or datetime.now()
+    visit_time_text = visit_time.strftime("%d.%m.%Y %H:%M")
+    media_type = state_data.get("media_type") or "none"
+    preview_lines = [
+        "Проверьте данные перед сохранением:",
+        f"📅 Дата визита: {visit_time_text}",
+        f"🏢 Подразделение: {state_data.get('subdivision', '')}",
+        f"🎧 Позывные: {state_data.get('callsigns', '')}",
+        f"📝 Задачи: {state_data.get('tasks', '')}",
+        f"📎 Тип медиа: {media_type}",
+    ]
+    if state_data.get("media_path"):
+        preview_lines.append(f"🔗 Ссылка: {state_data['media_path']}")
+    preview_lines.append("")
+    preview_lines.append("Сохранить или отредактировать?")
+    logger.debug(
+        "Предпросмотр визита от @%s: %s",
+        user.username,
+        _safe_log_arg(preview_lines),
+    )
+    return "\n".join(preview_lines)
+
+
+async def _show_visit_preview(target, state: FSMContext, *, user) -> None:
+    state_data = await state.get_data()
+    text = _build_visit_preview_text(state_data, user)
+    await state.set_state(VisitState.review)
+    if isinstance(target, CallbackQuery):
+        await target.message.edit_text(text, reply_markup=_visit_review_keyboard())
+    else:
+        await target.answer(text, reply_markup=_visit_review_keyboard())
+
+
+async def _finalize_visit_record(
+    db_pool,
+    state: FSMContext,
+    *,
+    admin_id: int,
+    admin_username: str | None,
+    admin_first_name: str | None,
+    admin_last_name: str | None,
+    subdivision: str,
+    callsigns: str,
+    tasks: str,
+    media_type: str,
+    media_path: str | None,
+    username: str | None,
+) -> int:
+    visit_id = await add_visit(
+        db_pool,
+        admin_tg_id=admin_id,
+        admin_username=admin_username,
+        admin_first_name=admin_first_name,
+        admin_last_name=admin_last_name,
+        subdivision=subdivision,
+        callsigns=callsigns,
+        tasks=tasks,
+        media_type=media_type,
+        media_path=media_path,
+    )
+    await finish_visit(db_pool, visit_id)
+    await state.update_data(visit_id=visit_id)
+    logger.info("Визит ID %s записан администратором @%s", visit_id, username)
+    return visit_id
 
 
 def _defect_media_directory(media_type: str) -> Path:
@@ -499,6 +667,620 @@ async def admin_panel_prompt(callback: CallbackQuery, **data):
     )
 
 
+@router.callback_query(F.data == "manage_visits")
+async def manage_visits_menu(callback: CallbackQuery, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при открытии меню визитов")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]
+            ),
+        )
+        await callback.answer()
+        return
+
+    admin = await _fetch_admin_record(db_pool, callback.from_user.id)
+    if not admin:
+        await callback.message.edit_text(
+            "Доступ запрещён.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]
+            ),
+        )
+        logger.warning(
+            "Попытка открытия меню визитов без прав от пользователя @%s", callback.from_user.username
+        )
+        return
+    await callback.message.edit_text("Учёт визитов:", reply_markup=get_visits_menu())
+    await callback.answer()
+    logger.debug(
+        "Администратор @%s (ID: %s) открыл меню учёта визитов",
+        callback.from_user.username,
+        callback.from_user.id,
+    )
+
+
+@router.callback_query(F.data == "visit_start")
+async def visit_start(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при начале визита")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]
+            ),
+        )
+        await callback.answer()
+        return
+
+    admin = await _fetch_admin_record(db_pool, callback.from_user.id)
+    if not admin:
+        await callback.message.edit_text(
+            "Доступ запрещён.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]
+            ),
+        )
+        logger.warning(
+            "Попытка начала визита без прав от пользователя @%s", callback.from_user.username
+        )
+        return
+    await state.set_state(VisitState.subdivision)
+    await state.update_data(started_at=datetime.now())
+    await callback.message.edit_text(
+        "Введите номер подразделения:",
+        reply_markup=_single_back_keyboard("manage_visits"),
+    )
+    await callback.answer()
+    logger.info(
+        "Администратор @%s (ID: %s) начал фиксацию визита",
+        callback.from_user.username,
+        callback.from_user.id,
+    )
+
+
+@router.message(StateFilter(VisitState.subdivision))
+async def visit_subdivision_handler(message: Message, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при вводе подразделения визита")
+        await message.answer(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=_single_back_keyboard("main_menu"),
+        )
+        await state.clear()
+        return
+
+    admin = await _fetch_admin_record(db_pool, message.from_user.id)
+    if not admin:
+        await message.answer(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка ввода подразделения без прав от пользователя @%s", message.from_user.username
+        )
+        return
+    subdivision = (message.text or "").strip()
+    if not subdivision:
+        await message.answer(
+            "Введите номер подразделения:", reply_markup=_single_back_keyboard("manage_visits")
+        )
+        return
+    await state.update_data(subdivision=subdivision)
+    state_data = await state.get_data()
+    if state_data.get("return_to_review"):
+        await state.update_data(return_to_review=False)
+        await _show_visit_preview(message, state, user=message.from_user)
+        return
+    await state.set_state(VisitState.callsigns)
+    await message.answer(
+        "Введите позывные, с которыми вы работали:",
+        reply_markup=_single_back_keyboard("manage_visits"),
+    )
+    logger.debug(
+        "Подразделение '%s' сохранено для визита от @%s",
+        subdivision,
+        message.from_user.username,
+    )
+
+
+@router.message(StateFilter(VisitState.callsigns))
+async def visit_callsigns_handler(message: Message, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при вводе позывных визита")
+        await message.answer(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=_single_back_keyboard("main_menu"),
+        )
+        await state.clear()
+        return
+
+    admin = await _fetch_admin_record(db_pool, message.from_user.id)
+    if not admin:
+        await message.answer(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка ввода позывных без прав от пользователя @%s", message.from_user.username
+        )
+        return
+
+    callsigns = (message.text or "").strip()
+    if not callsigns:
+        await message.answer(
+            "Введите позывные, с которыми вы работали:",
+            reply_markup=_single_back_keyboard("manage_visits"),
+        )
+        return
+    await state.update_data(callsigns=callsigns)
+    state_data = await state.get_data()
+    if state_data.get("return_to_review"):
+        await state.update_data(return_to_review=False)
+        await _show_visit_preview(message, state, user=message.from_user)
+        return
+    await state.set_state(VisitState.tasks)
+    await message.answer(
+        "Опишите выполненные задачи:",
+        reply_markup=_single_back_keyboard("manage_visits"),
+    )
+    logger.debug(
+        "Позывные '%s' сохранены для визита от @%s",
+        callsigns,
+        message.from_user.username,
+    )
+
+
+@router.message(StateFilter(VisitState.tasks))
+async def visit_tasks_handler(message: Message, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при вводе задач визита")
+        await message.answer(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=_single_back_keyboard("main_menu"),
+        )
+        await state.clear()
+        return
+
+    admin = await _fetch_admin_record(db_pool, message.from_user.id)
+    if not admin:
+        await message.answer(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка ввода задач без прав от пользователя @%s", message.from_user.username
+        )
+        return
+
+    tasks = (message.text or "").strip()
+    if not tasks:
+        await message.answer(
+            "Опишите выполненные задачи:",
+            reply_markup=_single_back_keyboard("manage_visits"),
+        )
+        return
+    await state.update_data(tasks=tasks)
+    state_data = await state.get_data()
+    if state_data.get("return_to_review"):
+        await state.update_data(return_to_review=False)
+        await _show_visit_preview(message, state, user=message.from_user)
+        return
+    await state.set_state(VisitState.media)
+    await message.answer(
+        "Пришлите фото или видео выполненной работы. Если медиа нет, нажмите 'Пропустить' или напишите 'нет'.",
+        reply_markup=_visit_media_keyboard(),
+    )
+    logger.debug(
+        "Задачи для визита сохранены от @%s: %s",
+        message.from_user.username,
+        tasks,
+    )
+
+
+@router.message(StateFilter(VisitState.media))
+async def visit_media_handler(message: Message, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при сохранении визита")
+        await message.answer(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=_visit_media_keyboard(),
+        )
+        await state.clear()
+        return
+
+    admin = await _fetch_admin_record(db_pool, message.from_user.id)
+    if not admin:
+        await message.answer(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка загрузки медиа визита без прав от пользователя @%s", message.from_user.username
+        )
+        return
+
+    state_data = await state.get_data()
+    subdivision = state_data.get("subdivision", "")
+    callsigns = state_data.get("callsigns", "")
+    tasks = state_data.get("tasks", "")
+    media_type = "none"
+    media_path = None
+    download_result: Optional[DownloadResult] = None
+    progress_message: Optional[Message] = None
+
+    try:
+        if message.photo:
+            largest_photo = message.photo[-1]
+            cache_dir = Path(LOCAL_BOT_API_CACHE_DIR) / "visits"
+            download_result = await download_from_local_api(
+                file_id=largest_photo.file_id,
+                token=TOKEN,
+                base_dir=str(cache_dir),
+            )
+            source_path = Path(download_result.local_path)
+            suffix = source_path.suffix or ".jpg"
+            base_name = _visit_media_basename(subdivision, callsigns, message.from_user.id)
+            final_path = _ensure_unique_media_path(
+                Path(VISITS_MEDIA_DIR) / "photos", base_name, suffix
+            )
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.replace(final_path)
+            media_type = "photo"
+            media_path = build_public_url(final_path)
+            logger.debug(
+                "Фото визита сохранено от @%s: %s",
+                message.from_user.username,
+                _safe_log_arg(media_path),
+            )
+        elif message.video or message.video_note:
+            video_obj = message.video or message.video_note
+            if getattr(video_obj, "file_size", 0) and video_obj.file_size > 2_000_000_000:
+                await message.answer(
+                    "Видео слишком большое (максимум 2 ГБ).",
+                    reply_markup=_single_back_keyboard("manage_visits"),
+                )
+                logger.warning(
+                    "Слишком большой видеофайл визита от @%s: %s байт",
+                    message.from_user.username,
+                    video_obj.file_size,
+                )
+                await state.clear()
+                return
+            cache_dir = Path(LOCAL_BOT_API_CACHE_DIR) / "visits"
+            download_result = await download_from_local_api(
+                file_id=video_obj.file_id,
+                token=TOKEN,
+                base_dir=str(cache_dir),
+            )
+            progress_message = await message.answer(
+                "Видео получено. Выполняется сжатие, это может занять несколько минут..."
+            )
+            compressed_path = await compress_video(download_result.local_path)
+            try:
+                if progress_message:
+                    await progress_message.edit_text("Сжатие завершено ✅")
+            except TelegramBadRequest:
+                pass
+            compressed_file = Path(compressed_path)
+            suffix = compressed_file.suffix or ".mp4"
+            base_name = _visit_media_basename(subdivision, callsigns, message.from_user.id)
+            final_path = _ensure_unique_media_path(
+                Path(VISITS_MEDIA_DIR) / "videos", base_name, suffix
+            )
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            compressed_file.replace(final_path)
+            media_type = "video"
+            media_path = build_public_url(final_path)
+            logger.debug(
+                "Видео визита сохранено от @%s: %s",
+                message.from_user.username,
+                _safe_log_arg(media_path),
+            )
+        else:
+            text_value = (message.text or "").strip().lower()
+            if text_value in {"нет", "без медиа", "нет медиа", "нету"}:
+                media_type = "none"
+                media_path = None
+                logger.debug("Визит без медиа от @%s", message.from_user.username)
+            else:
+                await message.answer(
+                    "Пришлите фото или видео выполненной работы. Если медиа нет, нажмите 'Пропустить' или напишите 'нет'.",
+                    reply_markup=_visit_media_keyboard(),
+                )
+                return
+
+        await state.update_data(
+            media_type=media_type,
+            media_path=media_path,
+            return_to_review=False,
+        )
+        await _show_visit_preview(message, state, user=message.from_user)
+    except LocalBotAPIConfigurationError as config_error:
+        logger.error(
+            "Ошибка конфигурации локального Bot API при сохранении визита: %s",
+            config_error,
+        )
+        await message.answer(
+            "Локальный Bot API работает в режиме --local, но путь к данным не настроен. "
+            "Укажите LOCAL_BOT_API_DATA_DIR и примонтируйте каталог перед повторной загрузкой.",
+            reply_markup=_single_back_keyboard("manage_visits"),
+        )
+        await state.clear()
+    except Exception as exc:
+        logger.exception("Не удалось сохранить визит: %s", exc)
+        await message.answer(
+            "Ошибка при сохранении визита. Попробуйте позже.",
+            reply_markup=_single_back_keyboard("manage_visits"),
+        )
+        await state.clear()
+    finally:
+        if progress_message:
+            try:
+                await progress_message.delete()
+            except TelegramBadRequest:
+                pass
+        if download_result:
+            await _cleanup_source_file(download_result.source_path)
+
+
+@router.callback_query(F.data == "visit_skip", StateFilter(VisitState.media))
+async def visit_media_skip(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при пропуске медиа визита")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.", reply_markup=get_visits_menu()
+        )
+        await state.clear()
+        return
+
+    admin = await _fetch_admin_record(db_pool, callback.from_user.id)
+    if not admin:
+        await callback.message.edit_text(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка пропуска медиа без прав от пользователя @%s", callback.from_user.username
+        )
+        await callback.answer()
+        return
+
+    state_data = await state.get_data()
+    await state.update_data(media_type="none", media_path=None)
+    await _show_visit_preview(callback, state, user=callback.from_user)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "visit_save", StateFilter(VisitState.review))
+async def visit_save(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при сохранении визита")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.", reply_markup=get_visits_menu()
+        )
+        await state.clear()
+        return
+
+    admin = await _fetch_admin_record(db_pool, callback.from_user.id)
+    if not admin:
+        await callback.message.edit_text(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка сохранения визита без прав от пользователя @%s", callback.from_user.username
+        )
+        await callback.answer()
+        return
+
+    state_data = await state.get_data()
+    try:
+        visit_id = await _finalize_visit_record(
+            db_pool,
+            state,
+            admin_id=callback.from_user.id,
+            admin_username=callback.from_user.username,
+            admin_first_name=callback.from_user.first_name,
+            admin_last_name=callback.from_user.last_name,
+            subdivision=state_data.get("subdivision", ""),
+            callsigns=state_data.get("callsigns", ""),
+            tasks=state_data.get("tasks", ""),
+            media_type=state_data.get("media_type", "none"),
+            media_path=state_data.get("media_path"),
+            username=callback.from_user.username,
+        )
+        await state.clear()
+        summary_lines = [
+            f"Визит №{visit_id} зафиксирован.",
+            f"Администратор: {_format_admin_display(callback.from_user)}",
+            f"Подразделение: {state_data.get('subdivision', '')}",
+            f"Позывные: {state_data.get('callsigns', '')}",
+            f"Задачи: {state_data.get('tasks', '')}",
+        ]
+        media_type = state_data.get("media_type", "none")
+        media_path = state_data.get("media_path")
+        summary_lines.append(
+            "Медиа: отсутствует" if media_type == "none" else f"Медиа: {media_type}"
+        )
+        if media_path:
+            summary_lines.append(f"Ссылка: {media_path}")
+        await callback.message.edit_text(
+            "\n".join(summary_lines), reply_markup=get_visits_menu()
+        )
+        await callback.answer()
+        logger.info(
+            "Визит ID %s сохранён администратором @%s", visit_id, callback.from_user.username
+        )
+    except Exception as exc:
+        logger.exception("Не удалось сохранить визит: %s", exc)
+        await callback.message.edit_text(
+            "Ошибка при сохранении визита. Попробуйте позже.",
+            reply_markup=_single_back_keyboard("manage_visits"),
+        )
+        await state.clear()
+
+
+@router.callback_query(
+    F.data.in_(
+        {
+            "visit_edit_subdivision",
+            "visit_edit_callsigns",
+            "visit_edit_tasks",
+            "visit_edit_media",
+        }
+    ),
+    StateFilter(VisitState.review),
+)
+async def visit_edit_field(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при редактировании визита")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.", reply_markup=get_visits_menu()
+        )
+        await state.clear()
+        return
+
+    admin = await _fetch_admin_record(db_pool, callback.from_user.id)
+    if not admin:
+        await callback.message.edit_text(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка редактирования визита без прав от пользователя @%s", callback.from_user.username
+        )
+        await callback.answer()
+        return
+
+    target = callback.data
+    await state.update_data(return_to_review=True)
+    if target == "visit_edit_subdivision":
+        await state.set_state(VisitState.subdivision)
+        await callback.message.edit_text(
+            "Введите номер подразделения:",
+            reply_markup=_single_back_keyboard("manage_visits"),
+        )
+    elif target == "visit_edit_callsigns":
+        await state.set_state(VisitState.callsigns)
+        await callback.message.edit_text(
+            "Введите позывные, с которыми вы работали:",
+            reply_markup=_single_back_keyboard("manage_visits"),
+        )
+    elif target == "visit_edit_tasks":
+        await state.set_state(VisitState.tasks)
+        await callback.message.edit_text(
+            "Опишите выполненные задачи:",
+            reply_markup=_single_back_keyboard("manage_visits"),
+        )
+    else:
+        await state.set_state(VisitState.media)
+        await callback.message.edit_text(
+            "Пришлите фото или видео выполненной работы. Если медиа нет, нажмите 'Пропустить' или напишите 'нет'.",
+            reply_markup=_visit_media_keyboard(),
+        )
+    await callback.answer()
+    logger.debug(
+        "Редактирование поля %s для визита от @%s", target, callback.from_user.username
+    )
+
+
+@router.callback_query(F.data == "visit_cancel", StateFilter(VisitState.review))
+async def visit_cancel(callback: CallbackQuery, state: FSMContext, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при отмене визита")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.", reply_markup=get_visits_menu()
+        )
+        await state.clear()
+        await callback.answer()
+        return
+
+    admin = await _fetch_admin_record(db_pool, callback.from_user.id)
+    if not admin:
+        await callback.message.edit_text(
+            "Доступ запрещён.", reply_markup=_single_back_keyboard("main_menu")
+        )
+        await state.clear()
+        logger.warning(
+            "Попытка отмены визита без прав от пользователя @%s", callback.from_user.username
+        )
+        await callback.answer()
+        return
+
+    await state.clear()
+    await callback.message.edit_text(
+        "Визит отменён.", reply_markup=get_visits_menu()
+    )
+    await callback.answer()
+    logger.info("Визит отменён администратором @%s", callback.from_user.username)
+
+
+@router.callback_query(F.data == "visit_export")
+async def visit_export_handler(callback: CallbackQuery, **data):
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при выгрузке визитов")
+        await callback.message.edit_text(
+            "Ошибка сервера. Попробуйте позже.", reply_markup=get_visits_menu()
+        )
+        return
+
+    admin = await _fetch_admin_record(db_pool, callback.from_user.id)
+    if not admin:
+        await callback.message.edit_text(
+            "Доступ запрещён.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]
+            ),
+        )
+        logger.warning(
+            "Попытка выгрузки визитов без прав от пользователя @%s", callback.from_user.username
+        )
+        await callback.answer()
+        return
+
+    await normalize_visit_media_paths(db_pool)
+    visits = await get_visits_for_export(db_pool)
+    if not visits:
+        await callback.message.edit_text(
+            "Нет визитов для выгрузки.", reply_markup=get_visits_menu()
+        )
+        await callback.answer()
+        logger.info("Запрошена выгрузка визитов, данных нет (пользователь @%s)", callback.from_user.username)
+        return
+
+    export_dir = Path(LOCAL_BOT_API_CACHE_DIR) / "visits_exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    today_suffix = datetime.now().strftime("%Y-%m-%d")
+    file_path = export_dir / f"visits_{today_suffix}.xlsx"
+    await export_visits_to_excel(visits, file_path)
+    await callback.message.answer_document(
+        BufferedInputFile(file_path.read_bytes(), filename=file_path.name),
+        caption="Выгрузка всех визитов",
+    )
+    await callback.answer()
+    logger.info(
+        "Все визиты выгружены пользователем @%s",
+        callback.from_user.username,
+    )
+    try:
+        file_path.unlink()
+    except OSError:
+        pass
+
+
 @router.callback_query(F.data.startswith("select_exam_"))
 async def select_exam_record(callback: CallbackQuery, state: FSMContext, **data):
     db_pool = data.get("db_pool")
@@ -586,18 +1368,9 @@ async def new_exam_record(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "exam_menu")
-async def exam_menu_prompt(callback: CallbackQuery, **data):
+async def exam_menu_prompt(callback: CallbackQuery, state: FSMContext, **data):
     db_pool = data.get("db_pool")
-    if not db_pool:
-        logger.error("db_pool отсутствует в data")
-        await callback.message.edit_text(
-            "Ошибка сервера. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
-                ]
-            ),
-        )
+    if not await _ensure_exam_admin(callback, state, db_pool):
         return
     await callback.message.edit_text("Меню экзаменов:", reply_markup=get_exam_menu())
     logger.debug(
@@ -817,8 +1590,31 @@ async def exam_delete_cancel(callback: CallbackQuery, state: FSMContext):
     logger.debug("Пользователь @%s отменил удаление экзамена", callback.from_user.username)
 
 
+async def _ensure_exam_admin(callback: CallbackQuery, state: FSMContext, db_pool) -> bool:
+    """Проверяет, что пользователь имеет права администратора для работы с экзаменами."""
+    if db_pool is None:
+        logger.error("db_pool отсутствует при проверке доступа к экзаменам")
+        await callback.answer("Ошибка доступа к базе данных", show_alert=True)
+        await state.clear()
+        return False
+
+    admin = await _fetch_admin_record(db_pool, callback.from_user.id)
+    if not admin:
+        logger.warning(
+            "Пользователь @%s (ID: %s) попытался открыть приём экзамена без прав",
+            callback.from_user.username,
+            callback.from_user.id,
+        )
+        await callback.answer("Раздел доступен только администраторам", show_alert=True)
+        await state.clear()
+        return False
+    return True
+
+
 @router.callback_query(F.data == "take_exam")
-async def take_exam_prompt(callback: CallbackQuery, state: FSMContext):
+async def take_exam_prompt(callback: CallbackQuery, state: FSMContext, **data):
+    if not await _ensure_exam_admin(callback, state, data.get("db_pool")):
+        return
     await callback.message.edit_text(
         "⚠️ Внимание!\n"
         "Продолжая использовать бот, вы автоматически соглашаетесь с обработкой ваших персональных данных.\n"
