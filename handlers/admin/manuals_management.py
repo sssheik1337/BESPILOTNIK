@@ -39,10 +39,10 @@ from config import (
 )
 from handlers.admin.admin_panel import download_from_local_api, _cleanup_source_file
 from utils.video import compress_video
-import logging
+from utils.logger import get_logger
 
 router = Router()
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 MANUAL_CATEGORIES = {
     "remote_settings": "Настройка пульта",

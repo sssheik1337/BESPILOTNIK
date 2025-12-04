@@ -2,9 +2,9 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters.callback_data import CallbackData
 from config import MAIN_ADMIN_IDS
 from utils.statuses import APPEAL_STATUSES
-import logging
+from utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 

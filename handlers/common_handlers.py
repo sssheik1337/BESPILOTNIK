@@ -23,14 +23,14 @@ from keyboards.inline import (
 )
 from config import MAIN_ADMIN_IDS
 from utils.storage import public_root
-import logging
 import traceback
+from utils.logger import get_logger
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from utils.validators import validate_serial
 from database.db import get_serial_history, get_manual_files, get_user_training_invite
 import asyncio
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = Router()
 

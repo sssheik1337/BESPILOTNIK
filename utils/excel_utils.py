@@ -3,10 +3,11 @@ import re
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
-import logging
 from zipfile import BadZipFile
 
-logger = logging.getLogger(__name__)
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def validate_serial(serial):

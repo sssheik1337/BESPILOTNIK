@@ -16,9 +16,9 @@ from database.db import (
     update_exam_record,
 )
 from config import MAIN_ADMIN_IDS
-import logging
+from utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = Router()
 

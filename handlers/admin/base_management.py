@@ -12,13 +12,13 @@ from aiogram.filters import StateFilter
 from keyboards.inline import get_base_management_menu
 from utils.excel_utils import import_serials, export_serials
 from database.db import get_defect_reports
-import logging
 from io import BytesIO
 import pandas as pd
 import json
 from typing import Optional
+from utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = Router()
 

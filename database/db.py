@@ -2,10 +2,11 @@ import asyncpg
 from datetime import datetime
 import json
 from config import DB_CONFIG
-import logging
 import re
 
-logger = logging.getLogger(__name__)
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 pool = None
 
