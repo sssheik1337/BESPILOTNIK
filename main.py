@@ -12,7 +12,7 @@ from aiogram.types import (
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
-from config import TOKEN, API_BASE_URL, WEBHOOK_URL, MAIN_ADMIN_IDS
+from config import TOKEN, API_BASE_URL, WEBHOOK_URL, MAIN_ADMIN_IDS, BOT_MODE
 from urllib.parse import quote
 
 from utils.storage import ensure_within_public_root, public_root
@@ -289,6 +289,20 @@ async def on_startup(app):
     await bot.set_webhook(WEBHOOK_URL)
     logger.info(f"Webhook установлен: {WEBHOOK_URL}")
     pool = await initialize_db()
+    await setup_common_features(bot, dp, pool)
+
+
+async def on_shutdown(app):
+    bot = app["bot"]
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.session.close()
+    await close_db()
+    logger.info("Webhook удалён, сессия закрыта")
+
+
+async def setup_common_features(bot: Bot, dp: Dispatcher, pool):
+    """Регистрация общих элементов для обоих режимов."""
+
     dp.update.outer_middleware.register(DatabaseMiddleware(pool))
     dp.update.outer_middleware.register(SerialCheckMiddleware())
     asyncio.create_task(check_overdue_appeals(bot))
@@ -301,27 +315,9 @@ async def on_startup(app):
     logger.info("Команды бота обновлены и кнопка меню установлена")
 
 
-async def on_shutdown(app):
-    bot = app["bot"]
-    await bot.delete_webhook(drop_pending_updates=True)
-    await bot.session.close()
-    await close_db()
-    logger.info("Webhook удалён, сессия закрыта")
+def create_dispatcher() -> Dispatcher:
+    """Создание диспетчера с регистрацией всех роутеров."""
 
-
-def main():
-    global bot, dp
-
-    if not TOKEN or " " in TOKEN:
-        # Осознанная остановка с пояснением, чтобы не запускать бота с некорректным токеном
-        raise ValueError(
-            "Переменная окружения BOT_TOKEN не задана или содержит пробелы. "
-            "Укажите действительный токен без пробелов."
-        )
-
-    bot = Bot(
-        token=TOKEN, session=AiohttpSession(), base_url=API_BASE_URL.format(token=TOKEN)
-    )
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(admin_panel.router)
     dp.include_router(user_handlers.router)
@@ -334,6 +330,33 @@ def main():
     dp.include_router(overdue_checks.router)
     dp.include_router(closed_appeals.router)
     dp.include_router(manuals_management.router)
+    return dp
+
+
+async def run_devops_mode():
+    """Запуск в режиме DEVOPS с polling и стандартным Telegram API."""
+
+    bot = Bot(token=TOKEN)
+    dp = create_dispatcher()
+
+    pool = await initialize_db()
+    await setup_common_features(bot, dp, pool)
+
+    logger.info("Bot started in DEVOPS mode (polling, Telegram API)")
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+        await close_db()
+
+
+def run_prod_mode():
+    """Запуск в режиме PROD с webhook и локальным Bot API."""
+
+    bot = Bot(
+        token=TOKEN, session=AiohttpSession(), base_url=API_BASE_URL.format(token=TOKEN)
+    )
+    dp = create_dispatcher()
 
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
@@ -348,8 +371,22 @@ def main():
     webhook_requests_handler.register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
 
-    logger.info("Бот запущен в режиме Webhook")
+    logger.info("Bot started in PROD mode (webhook, Local Telegram API)")
     web.run_app(app, host="0.0.0.0", port=8000)
+
+
+def main():
+    if not TOKEN or " " in TOKEN:
+        # Осознанная остановка с пояснением, чтобы не запускать бота с некорректным токеном
+        raise ValueError(
+            "Переменная окружения BOT_TOKEN не задана или содержит пробелы. "
+            "Укажите действительный токен без пробелов."
+        )
+
+    if BOT_MODE == "DEVOPS":
+        asyncio.run(run_devops_mode())
+    else:
+        run_prod_mode()
 
 
 if __name__ == "__main__":
