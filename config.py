@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TOKEN = os.getenv("BOT_TOKEN", "TELEGRAM TOKEN")
+TOKEN = os.getenv("BOT_TOKEN", "")
 LOCAL_BOT_API_HOST = os.getenv("LOCAL_BOT_API_HOST", "http://localhost:8081")
 LOCAL_BOT_API_REMOTE_DIR = os.getenv("LOCAL_BOT_API_REMOTE_DIR", "/var/lib/telegram-bot-api")
 # Укажи путь к примонтированному каталогу данных Telegram Bot API на хосте,

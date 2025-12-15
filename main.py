@@ -311,6 +311,14 @@ async def on_shutdown(app):
 
 def main():
     global bot, dp
+
+    if not TOKEN or " " in TOKEN:
+        # Осознанная остановка с пояснением, чтобы не запускать бота с некорректным токеном
+        raise ValueError(
+            "Переменная окружения BOT_TOKEN не задана или содержит пробелы. "
+            "Укажите действительный токен без пробелов."
+        )
+
     bot = Bot(
         token=TOKEN, session=AiohttpSession(), base_url=API_BASE_URL.format(token=TOKEN)
     )
