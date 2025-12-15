@@ -14,6 +14,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 from config import TOKEN, API_BASE_URL, WEBHOOK_URL, MAIN_ADMIN_IDS, BOT_MODE
 from urllib.parse import quote
+from aiogram.exceptions import TelegramUnauthorizedError
 
 from utils.storage import ensure_within_public_root, public_root
 from utils.logger import get_logger
@@ -340,11 +341,18 @@ async def run_devops_mode():
     dp = create_dispatcher()
 
     pool = await initialize_db()
-    await setup_common_features(bot, dp, pool)
-
-    logger.info("Bot started in DEVOPS mode (polling, Telegram API)")
     try:
+        await setup_common_features(bot, dp, pool)
+        logger.info("Bot started in DEVOPS mode (polling, Telegram API)")
         await dp.start_polling(bot)
+    except TelegramUnauthorizedError as exc:
+        logger.error(
+            "Не удалось авторизоваться в Telegram API в режиме DEVOPS. Проверьте BOT_TOKEN: %s",
+            exc,
+        )
+        raise ValueError(
+            "Авторизация в Telegram API не удалась. Убедитесь, что BOT_TOKEN указан верно без кавычек и пробелов."
+        ) from exc
     finally:
         await bot.session.close()
         await close_db()
