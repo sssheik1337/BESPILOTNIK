@@ -484,7 +484,7 @@ async def validate_exam_record(
     """
     Определяет существующую запись экзамена по телеграм-ID в поле contact,
     либо по личному номеру для старых записей без телеграм-ID.
-    Формат нового contact: "+<phone>,@<username>,<telegram_id>".
+    Формат нового contact: "+<phone>,@<username>,ID<telegram_id>".
     """
 
     def extract_telegram_id(contact_value: str):
@@ -505,6 +505,8 @@ async def validate_exam_record(
         for candidate in candidates:
             if not candidate:
                 continue
+            candidate = candidate.strip()
+            candidate = re.sub(r"^id[:\s]*", "", candidate, flags=re.IGNORECASE)
             if candidate.startswith("+"):
                 candidate = candidate[1:]
             if not candidate.isdigit():

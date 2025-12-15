@@ -295,7 +295,7 @@ async def process_contact(message: Message, state: FSMContext, bot: Bot):
     username_value = message.from_user.username or ""
     if username_value and not username_value.startswith("@"):
         username_value = f"@{username_value}"
-    contact_value = f"{phone_value},{username_value},{message.from_user.id}"
+    contact_value = f"{phone_value},{username_value},ID{message.from_user.id}"
     await state.update_data(contact=contact_value)
     if await _maybe_return_to_review(message, state):
         return

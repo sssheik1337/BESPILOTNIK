@@ -3868,12 +3868,48 @@ async def export_exams_handler(callback: CallbackQuery, **data):
             return value
 
     def format_contact_value(contact_value: str) -> str:
-        """Форматирует контакт: телефон с "+", username с "@", ID без изменений."""
+        """Форматирует контакт: телефон с "+", username с "@", ID с префиксом "ID"."""
 
         if contact_value is None:
             return "Отсутствует"
 
         parts = [part.strip() for part in contact_value.split(",")]
+
+        def normalize_phone(value: str) -> str:
+            if not value:
+                return ""
+            cleaned = value.strip()
+            if cleaned.startswith("+"):
+                cleaned_digits = cleaned[1:]
+            else:
+                cleaned_digits = cleaned
+            if cleaned_digits.isdigit():
+                return f"+{cleaned_digits}"
+            return cleaned
+
+        def normalize_username(value: str) -> str:
+            if not value:
+                return ""
+            cleaned = value.strip()
+            if not cleaned.startswith("@"):
+                cleaned = f"@{cleaned}"
+            return cleaned
+
+        def normalize_telegram_id(value: str) -> str:
+            if not value:
+                return ""
+            cleaned = re.sub(r"^id[:\s]*", "", value.strip(), flags=re.IGNORECASE)
+            if cleaned.startswith("+"):
+                cleaned = cleaned[1:]
+            return cleaned if cleaned.isdigit() else ""
+
+        def looks_like_phone(value: str) -> bool:
+            if not value:
+                return False
+            cleaned = value.strip()
+            if cleaned.startswith("+"):
+                cleaned = cleaned[1:]
+            return cleaned.isdigit()
 
         # По умолчанию предполагаем новый порядок: телефон, username, ID
         phone = parts[0] if len(parts) >= 1 else ""
@@ -3881,25 +3917,17 @@ async def export_exams_handler(callback: CallbackQuery, **data):
         telegram_id = parts[2] if len(parts) >= 3 else ""
 
         # Старые записи могли сохранять ID первым, а телефон третьим
-        if (
-            len(parts) >= 3
-            and parts[0]
-            and parts[2]
-            and parts[0].lstrip("+").isdigit()
-            and parts[2].lstrip("+").isdigit()
-            and not parts[0].startswith("+")
-        ):
+        if len(parts) >= 3 and normalize_telegram_id(parts[0]) and looks_like_phone(parts[2]):
             telegram_id = parts[0]
             phone = parts[2]
             username = parts[1]
 
-        if phone and not phone.startswith("+") and phone.lstrip("+").isdigit():
-            phone = f"+{phone}"
+        phone = normalize_phone(phone)
+        username = normalize_username(username)
+        telegram_id_clean = normalize_telegram_id(telegram_id)
+        telegram_id_display = f"ID {telegram_id_clean}" if telegram_id_clean else ""
 
-        if username and not username.startswith("@"):
-            username = f"@{username}"
-
-        contact_parts = [part for part in [phone, username, telegram_id] if part]
+        contact_parts = [part for part in [phone, username, telegram_id_display] if part]
         return ", ".join(contact_parts) if contact_parts else "Отсутствует"
 
     for record in records:
