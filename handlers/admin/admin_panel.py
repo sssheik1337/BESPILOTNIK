@@ -3868,27 +3868,32 @@ async def export_exams_handler(callback: CallbackQuery, **data):
             return value
 
     def format_contact_value(contact_value: str) -> str:
-        """Форматирует контакт так, чтобы телефон был с "+", а username с "@"."""
+        """Форматирует контакт: телефон с "+", username с "@", ID без изменений."""
 
         if contact_value is None:
             return "Отсутствует"
 
         parts = [part.strip() for part in contact_value.split(",")]
+
+        # По умолчанию предполагаем новый порядок: телефон, username, ID
         phone = parts[0] if len(parts) >= 1 else ""
         username = parts[1] if len(parts) >= 2 else ""
         telegram_id = parts[2] if len(parts) >= 3 else ""
 
-        for part in reversed(parts):
-            cleaned_part = part.strip()
-            numeric_part = cleaned_part[1:] if cleaned_part.startswith("+") else cleaned_part
-            if numeric_part.isdigit():
-                telegram_id = numeric_part
-                break
+        # Старые записи могли сохранять ID первым, а телефон третьим
+        if (
+            len(parts) >= 3
+            and parts[0]
+            and parts[2]
+            and parts[0].lstrip("+").isdigit()
+            and parts[2].lstrip("+").isdigit()
+            and not parts[0].startswith("+")
+        ):
+            telegram_id = parts[0]
+            phone = parts[2]
+            username = parts[1]
 
-        if phone and phone.lstrip("+").isdigit() and telegram_id == phone.lstrip("+"):
-            phone = parts[2] if len(parts) >= 3 else ""
-
-        if phone and not phone.startswith("+"):
+        if phone and not phone.startswith("+") and phone.lstrip("+").isdigit():
             phone = f"+{phone}"
 
         if username and not username.startswith("@"):
