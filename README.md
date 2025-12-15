@@ -30,9 +30,10 @@
    pip install --upgrade pip
    pip install -r requirements.txt
    ```
-3. Установите FFmpeg для вашей ОС и убедитесь, что команда `ffmpeg -version` работает в том же терминале.
-4. Подготовьте PostgreSQL и создайте пользователя/базу, указанные в `config.py` (по умолчанию база `musorok`, пользователь `postgres`, пароль `Merryweather4670!`). При запуске бот сам создаст и обновит таблицы.
-5. Запустите локальный Telegram Bot API (подставьте свои `<API_ID>` и `<API_HASH>`):
+3. Скопируйте `.env.example` в `.env` и заполните все переменные окружения. Критично указать `BOT_TOKEN`, `BOT_MODE`, параметры PostgreSQL, публичный URL вебхука и настройки локального Telegram Bot API (если используется локальный режим).
+4. Установите FFmpeg для вашей ОС и убедитесь, что команда `ffmpeg -version` работает в том же терминале.
+5. Подготовьте PostgreSQL и создайте пользователя/базу из переменных окружения (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`). При запуске бот сам создаст и обновит таблицы.
+6. При необходимости запустите локальный Telegram Bot API (подставьте свои `<API_ID>` и `<API_HASH>`):
    ```bash
    docker run -d --name telegram-bot-api \
      -p 8081:8081 \
@@ -44,20 +45,22 @@
        --dir /var/lib/telegram-bot-api \
        --local
    ```
-6. Поместите onboarding-скриншоты (`start1.jpg`, `start2.jpg`, `start3.jpg`) в каталог, указанный в `PUBLIC_MEDIA_ROOT` (по умолчанию `data/`).
+7. Поместите onboarding-скриншоты (`start1.jpg`, `start2.jpg`, `start3.jpg`) в каталог, указанный в `PUBLIC_MEDIA_ROOT`.
 
 ## Конфигурация
-Перед запуском откройте `config.py` и задайте ключевые параметры:
-- `TOKEN` — токен бота из BotFather.
-- `NGROK_PUBLIC_URL` — HTTPS-адрес внешнего туннеля; `WEBHOOK_URL` формируется автоматически.
-- `LOCAL_BOT_API_HOST`, `LOCAL_BOT_API_REMOTE_DIR`, `LOCAL_BOT_API_DATA_DIR`, `LOCAL_BOT_API_CACHE_DIR` — настройки доступа к локальному Bot API и каталогу с файлами.
-- `PUBLIC_MEDIA_ROOT` / `PUBLIC_MEDIA_URL` — путь к каталогу, откуда будут раздаваться файлы, и базовый публичный URL.
-- `EXAM_VIDEOS_DIR`, `EXAM_PHOTOS_DIR`, `DEFECT_MEDIA_DIR`, `MANUALS_STORAGE_DIR` — подкаталоги для разных типов материалов.
-- `DB_CONFIG` — параметры подключения к PostgreSQL, если отличаетесь от значений по умолчанию.
+Все значения передаются через переменные окружения (`.env`). В `config.py` нет жёстко заданных путей или адресов, кроме вычисляемых значений на основе переданных переменных.
+
+Ключевые переменные:
+- `BOT_TOKEN` — токен бота из BotFather.
+- `BOT_MODE` — режим работы (`PROD` для вебхука и локального Bot API, `DEVOPS` для опроса Telegram API).
+- `NGROK_PUBLIC_URL` и `WEBHOOK_PATH` — формируют `WEBHOOK_URL` и `PUBLIC_MEDIA_URL`.
+- `LOCAL_BOT_API_HOST`, `LOCAL_BOT_API_REMOTE_DIR`, `LOCAL_BOT_API_DATA_DIR`, `LOCAL_BOT_API_CACHE_DIR` — настройки локального Bot API и каталогов.
+- `PUBLIC_MEDIA_ROOT` — корневой каталог публичных файлов; на его основе формируются подкаталоги `EXAM_*`, `DEFECT_MEDIA_DIR`, `MANUALS_STORAGE_DIR`, `VISITS_MEDIA_DIR`.
 - `MAIN_ADMIN_IDS` — список Telegram ID администраторов.
+- `POSTGRES_*` — параметры подключения к базе данных.
 
 ## Запуск
-1. Убедитесь, что PostgreSQL и контейнер Telegram Bot API запущены.
+1. Убедитесь, что PostgreSQL и, при использовании локального API, контейнер Telegram Bot API запущены.
 2. При необходимости пробросьте вебхук наружу: `ngrok http 8000`, затем обновите `NGROK_PUBLIC_URL`.
 3. Запустите бота:
    ```bash
