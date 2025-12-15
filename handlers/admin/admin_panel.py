@@ -3920,7 +3920,8 @@ async def export_exams_handler(callback: CallbackQuery, **data):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False)
-        worksheet = writer.sheets[writer.sheet_names[0]]
+        # Берём первый лист из уже созданных в writer.sheets
+        worksheet = writer.sheets[next(iter(writer.sheets))]
         for column_cells in worksheet.columns:
             max_length = max(
                 len(str(cell.value)) if cell.value is not None else 0
