@@ -481,28 +481,47 @@ async def delete_exam_record(exam_id: int) -> bool:
 async def validate_exam_record(
     fio, personal_number, military_unit, subdivision, specialty, contact
 ):
-    def normalize_string(s):
-        if not s:
-            return ""
-        # Удаляем пробелы, дефисы и приводим к нижнему регистру
-        return re.sub(r"\s+|-", "", s.lower())
+    """
+    Определяет существующую запись экзамена по телеграм-ID в поле contact,
+    либо по личному номеру для старых записей без телеграм-ID.
+    """
+
+    def extract_telegram_id(contact_value: str):
+        if not contact_value:
+            return None
+        parts = contact_value.split(",", 1)
+        if not parts or not parts[0].isdigit():
+            return None
+        try:
+            return int(parts[0])
+        except ValueError:
+            return None
+
+    input_telegram_id = extract_telegram_id(contact)
+    normalized_personal_number = normalize_personal_number(personal_number or "")
 
     async with pool.acquire() as conn:
-        records = await conn.fetch("SELECT * FROM exam_records")
+        records = await conn.fetch(
+            "SELECT exam_id, contact, personal_number FROM exam_records"
+        )
         for record in records:
-            # Проверяем совпадение с нормализацией
-            if (
-                normalize_string(record["fio"]) == normalize_string(fio)
-                or normalize_string(record["personal_number"])
-                == normalize_string(personal_number)
-                or normalize_string(record["military_unit"])
-                == normalize_string(military_unit)
-                or normalize_string(record["subdivision"])
-                == normalize_string(subdivision)
-                or normalize_string(record["specialty"]) == normalize_string(specialty)
-                or normalize_string(record["contact"]) == normalize_string(contact)
-            ):
-                return record["exam_id"]
+            record_telegram_id = extract_telegram_id(record["contact"])
+
+            if input_telegram_id is not None and record_telegram_id is not None:
+                if input_telegram_id == record_telegram_id:
+                    return record["exam_id"]
+                continue
+
+            if record_telegram_id is None:
+                record_personal_number = normalize_personal_number(
+                    record["personal_number"] or ""
+                )
+                if (
+                    normalized_personal_number
+                    and normalized_personal_number == record_personal_number
+                ):
+                    return record["exam_id"]
+
         return None
 
 

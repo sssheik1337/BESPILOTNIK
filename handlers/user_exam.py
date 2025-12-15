@@ -4,6 +4,9 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -259,11 +262,14 @@ async def process_specialty(message: Message, state: FSMContext, bot: Bot):
     if await _maybe_return_to_review(message, state):
         return
     await message.answer(
-        "Введите контакт для связи в Telegram:",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
-            ]
+        "Нажмите кнопку, чтобы отправить контактные данные Telegram (ID, username и телефон при наличии).",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="📱 Отправить контакт", request_contact=True)],
+                [KeyboardButton(text="⬅️ Назад")],
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True,
         ),
     )
     await state.set_state(UserExam.contact)
@@ -280,14 +286,17 @@ async def process_specialty(message: Message, state: FSMContext, bot: Bot):
 
 @router.message(StateFilter(UserExam.contact))
 async def process_contact(message: Message, state: FSMContext, bot: Bot):
-    contact = message.text.strip()
-    await state.update_data(contact=contact)
+    phone = ""
+    if message.contact and message.contact.phone_number:
+        phone = message.contact.phone_number
+    contact_value = f"{message.from_user.id},{message.from_user.username or ''},{phone}"
+    await state.update_data(contact=contact_value)
     if await _maybe_return_to_review(message, state):
         return
     await _send_exam_review(message, state)
     await state.set_state(UserExam.review)
     logger.debug(
-        f"Контакт {contact} принят от @{message.from_user.username} (ID: {message.from_user.id})"
+        f"Контакт {contact_value} принят от @{message.from_user.username} (ID: {message.from_user.id})"
     )
     try:
         await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
@@ -297,6 +306,12 @@ async def process_contact(message: Message, state: FSMContext, bot: Bot):
     except Exception as e:
         logger.error(
             f"Ошибка удаления сообщения с контактом для @{message.from_user.username}: {str(e)}"
+        )
+    try:
+        await message.answer("Контакт сохранен", reply_markup=ReplyKeyboardRemove())
+    except Exception as e:
+        logger.error(
+            f"Не удалось убрать клавиатуру после отправки контакта для @{message.from_user.username}: {str(e)}"
         )
 
 
@@ -470,7 +485,7 @@ async def edit_exam_field(callback: CallbackQuery, state: FSMContext):
         "subdivision": "Введите подразделение:",
         "callsign": "Введите позывной:",
         "specialty": "Введите направление (например, \"Север\", \"Юг\", \"Днепр\", \"Покровск\"):",
-        "contact": "Введите контакт для связи в Telegram:",
+        "contact": "Нажмите кнопку, чтобы отправить контактные данные Telegram (ID, username и телефон при наличии).",
     }
     target_state = {
         "fio": UserExam.fio,
@@ -488,12 +503,25 @@ async def edit_exam_field(callback: CallbackQuery, state: FSMContext):
         return
 
     await state.update_data(return_to_review=True)
-    await callback.message.answer(
-        prompts[action],
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_review_back")]]
-        ),
-    )
+    if action == "contact":
+        await callback.message.answer(
+            prompts[action],
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[
+                    [KeyboardButton(text="📱 Отправить контакт", request_contact=True)],
+                    [KeyboardButton(text="⬅️ Назад")],
+                ],
+                resize_keyboard=True,
+                one_time_keyboard=True,
+            ),
+        )
+    else:
+        await callback.message.answer(
+            prompts[action],
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="exam_review_back")]]
+            ),
+        )
     await state.set_state(target_state)
     await callback.answer()
 
