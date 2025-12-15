@@ -1,0 +1,672 @@
+from aiogram import Router, F, Bot
+from aiogram.types import (
+    Message,
+    ErrorEvent,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    InputMediaPhoto,
+    FSInputFile,
+)
+from aiogram.filters import CommandStart, Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from pathlib import Path
+
+from keyboards.inline import (
+    ManualCategoryCallback,
+    get_user_menu,
+    get_admin_menu,
+    get_manuals_menu,
+    get_manual_files_menu,
+    manual_category_cb,
+)
+from config import MAIN_ADMIN_IDS
+from utils.storage import public_root
+import traceback
+from utils.logger import get_logger
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from utils.validators import validate_serial
+from database.db import get_serial_history, get_manual_files, get_user_training_invite
+import asyncio
+
+logger = get_logger(__name__)
+
+router = Router()
+
+
+class UserState(StatesGroup):
+    waiting_for_auto_delete = State()
+    waiting_for_code_word = State()
+    waiting_for_serial = State()
+    menu = State()
+
+
+START_IMAGE_NAMES = ("start1.jpg", "start2.jpg", "start3.jpg")
+
+
+def get_start_media() -> list[InputMediaPhoto]:
+    media: list[InputMediaPhoto] = []
+    for image_name in START_IMAGE_NAMES:
+        image_path = public_root() / image_name
+        if not image_path.exists():
+            logger.warning(
+                "Стартовое изображение %s не найдено по пути %s",
+                image_name,
+                image_path,
+            )
+            continue
+        media.append(InputMediaPhoto(media=FSInputFile(image_path)))
+    return media
+
+
+async def clear_serial_state(user_id, state: FSMContext, delay=12 * 3600):
+    await asyncio.sleep(delay)
+    current_state = await state.get_state()
+    if current_state:
+        await state.clear()
+        logger.info(f"Состояние серийного номера очищено для пользователя ID {user_id}")
+
+
+def _scenario_selection_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🛟 Запрос техподдержки", callback_data="request_support"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🎓 Запись на обучение", callback_data="enroll_training"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📘 Руководство по настройке", callback_data="setup_manual"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏫 Мой УТЦ", callback_data="my_training"
+                )
+            ],
+        ]
+    )
+
+
+@router.message(CommandStart())
+async def start_command(message: Message, state: FSMContext, bot: Bot, **data):
+    user_id = message.from_user.id
+    username = message.from_user.username or "неизвестно"
+    logger.info(f"Получена команда /start от пользователя @{username} (ID: {user_id})")
+    logger.debug(f"Состояние FSM перед обработкой /start: {await state.get_data()}")
+    db_pool = data.get("db_pool")
+    if db_pool is None:
+        logger.error("Database connection pool is missing in handler data")
+        await message.answer("Ошибка подключения к базе данных. Попробуйте позже.")
+        return
+    is_admin = False
+    is_employee = False
+    async with db_pool.acquire() as conn:
+        admin = await conn.fetchrow(
+            "SELECT admin_id FROM admins WHERE admin_id = $1", user_id
+        )
+        logger.debug(f"Результат запроса admins для ID {user_id}: {admin}")
+        if admin or user_id in MAIN_ADMIN_IDS:
+            is_admin = True
+        employee = await conn.fetchrow(
+            "SELECT user_id, serial FROM users WHERE user_id = $1", user_id
+        )
+        logger.debug(f"Результат запроса users для ID {user_id}: {employee}")
+        if employee:
+            is_employee = True
+    await state.clear()
+    if is_admin:
+        await message.answer(
+            "Добро пожаловать, администратор!", reply_markup=get_admin_menu(user_id)
+        )
+        logger.debug(
+            f"Пользователь @{username} (ID: {user_id}) определён как администратор"
+        )
+        logger.debug(f"Пользователь @{username} (ID: {user_id}) получил админское меню")
+    elif is_employee:
+        serial = employee["serial"]
+        await state.update_data(serial=serial)
+        await state.set_state(UserState.menu)
+        await message.answer("Добро пожаловать!", reply_markup=get_user_menu())
+        logger.debug(
+            f"Пользователь @{username} (ID: {user_id}) определён как сотрудник"
+        )
+        logger.debug(
+            f"Пользователь @{username} (ID: {user_id}) получил пользовательское меню"
+        )
+    else:
+        await state.set_state(UserState.waiting_for_auto_delete)
+        try:
+            media = get_start_media()
+            if media:
+                await bot.send_media_group(chat_id=message.chat.id, media=media)
+            await message.answer(
+                "⚠️В целях безопасности включите автоматическое удаление сообщений через сутки в настройках Telegram.\n"
+                "Инструкция в прикреплённых изображениях.⚠️",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="✅ Я включил автоудаление",
+                                callback_data="confirm_auto_delete",
+                            )
+                        ]
+                    ]
+                ),
+            )
+            logger.debug(
+                f"Пользователь @{username} (ID: {user_id}) перенаправлен на запрос автоудаления"
+            )
+        except (TelegramBadRequest, TelegramForbiddenError, FileNotFoundError) as e:
+            logger.error(
+                f"Ошибка при запросе автоудаления для пользователя @{username} (ID: {user_id}): {str(e)}"
+            )
+            await message.answer("Ошибка. Попробуйте снова.")
+
+
+@router.callback_query(F.data == "confirm_auto_delete")
+async def confirm_auto_delete(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    username = callback.from_user.username or "неизвестно"
+    logger.debug(
+        f"Обработка confirm_auto_delete для пользователя @{username} (ID: {user_id})"
+    )
+    await callback.message.delete()
+    await callback.message.answer(
+        "Выберите действие:",
+        reply_markup=_scenario_selection_keyboard(),
+    )
+    await state.set_state(None)
+    logger.debug(
+        f"Пользователь @{username} (ID: {user_id}) подтвердил автоудаление и запрошен выбор сценария"
+    )
+    await callback.answer()
+
+
+@router.message(Command("getme"))
+async def getme_command(message: Message):
+    user = message.from_user
+    username = user.username or "не указан"
+    logger.debug(
+        "Команда /getme от пользователя @%s (ID: %s)", user.username or "неизвестно", user.id
+    )
+    await message.answer(
+        "Ваш Telegram ID: {id}\nUsername: {username}".format(
+            id=user.id,
+            username=f"@{username}" if user.username else username,
+        )
+    )
+
+
+@router.callback_query(F.data == "request_support")
+async def request_support(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    username = callback.from_user.username or "неизвестно"
+    await callback.message.edit_text(
+        "Введите кодовое слово:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
+            ]
+        ),
+    )
+    await state.update_data(scenario="support")
+    await state.set_state(UserState.waiting_for_code_word)
+    logger.debug(
+        f"Пользователь @{username} (ID: {user_id}) выбрал запрос техподдержки и ожидает кодовое слово"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "setup_manual")
+async def setup_manual(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    username = callback.from_user.username or "неизвестно"
+    await callback.message.edit_text(
+        "Введите кодовое слово:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
+            ]
+        ),
+    )
+    await state.update_data(scenario="manual")
+    await state.set_state(UserState.waiting_for_code_word)
+    logger.debug(
+        f"Пользователь @{username} (ID: {user_id}) выбрал руководство по настройке и ожидает кодовое слово"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "my_training")
+async def open_my_training(callback: CallbackQuery, state: FSMContext, **data):
+    user_id = callback.from_user.id
+    username = callback.from_user.username or "неизвестно"
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при запросе 'Мой УТЦ'")
+        await callback.answer("Ошибка сервера. Попробуйте позже.", show_alert=True)
+        return
+
+    record = await get_user_training_invite(user_id)
+    if not record or not record.get("chat_link"):
+        await callback.answer("Запишитесь на обучение", show_alert=True)
+        logger.info(
+            "Пользователь @%s (ID: %s) запросил 'Мой УТЦ', но записи не найдены",
+            username,
+            user_id,
+        )
+        return
+
+    await callback.message.edit_text(
+        "Введите кодовое слово:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
+            ]
+        ),
+    )
+    await state.update_data(
+        scenario="my_training",
+        training_link=record.get("chat_link"),
+        training_center=record.get("center_name"),
+    )
+    await state.set_state(UserState.waiting_for_code_word)
+    logger.debug(
+        "Пользователь @%s (ID: %s) запросил доступ к УТЦ '%s'", 
+        username,
+        user_id,
+        record.get("center_name"),
+    )
+    await callback.answer()
+
+
+@router.message(StateFilter(UserState.waiting_for_code_word))
+async def process_code_word_user(message: Message, state: FSMContext, **data):
+    user_id = message.from_user.id
+    username = message.from_user.username or "неизвестно"
+    code_word = message.text.strip()
+    db_pool = data.get("db_pool")
+    if not db_pool:
+        logger.error("db_pool отсутствует в data при проверке кодового слова пользователя")
+        await message.answer(
+            "Ошибка сервера. Попробуйте позже.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
+                ]
+            ),
+        )
+        return
+    async with db_pool.acquire() as conn:
+        db_code_word = await conn.fetchval(
+            "SELECT code_word FROM training_centers WHERE LOWER(code_word) = LOWER($1)",
+            code_word,
+        )
+        if not db_code_word:
+            await message.answer(
+                "Неверное кодовое слово. Попробуйте снова:",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="⬅️ Назад", callback_data="select_scenario"
+                            )
+                        ]
+                    ]
+                ),
+            )
+            logger.warning(
+                f"Неверное кодовое слово '{code_word}' от @{username} (ID: {user_id}) для пользовательского сценария"
+            )
+            return
+    await state.update_data(code_word=code_word)
+    data_state = await state.get_data()
+    scenario = data_state.get("scenario")
+    if scenario == "my_training":
+        training_link = data_state.get("training_link")
+        training_center = data_state.get("training_center") or "УТЦ"
+        if not training_link:
+            await message.answer(
+                "Пригласительная ссылка не найдена. Обратитесь к администратору.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="⬅️ Назад", callback_data="select_scenario"
+                            )
+                        ]
+                    ]
+                ),
+            )
+            await state.update_data(
+                scenario=None,
+                code_word=None,
+                training_link=None,
+                training_center=None,
+            )
+            await state.set_state(None)
+            logger.warning(
+                "Для пользователя @%s (ID: %s) не найдена ссылка на УТЦ при подтверждении кодового слова",
+                username,
+                user_id,
+            )
+        else:
+            await message.answer(
+                f"Ваш учебный центр: {training_center}\nПригласительная ссылка доступна ниже.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="Перейти в чат УТЦ", url=training_link
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text="⬅️ Назад", callback_data="select_scenario"
+                            )
+                        ],
+                    ]
+                ),
+            )
+            await state.update_data(
+                scenario=None,
+                code_word=None,
+                training_link=None,
+                training_center=None,
+            )
+            await state.set_state(None)
+            logger.info(
+                "Пользователь @%s (ID: %s) получил пригласительную ссылку УТЦ",
+                username,
+                user_id,
+            )
+    else:
+        await message.answer(
+            "Введите серийный номер:",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")],
+                ]
+            ),
+        )
+        await state.set_state(UserState.waiting_for_serial)
+        logger.info(
+            f"Кодовое слово принято от @{username} (ID: {user_id}); переход к запросу серийного номера"
+        )
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        logger.debug(
+            f"Не удалось удалить сообщение с кодовым словом от @{username} (ID: {user_id})"
+        )
+
+
+@router.callback_query(F.data == "select_scenario")
+async def select_scenario(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "Выберите действие:", reply_markup=_scenario_selection_keyboard()
+    )
+    await state.set_state(None)
+    logger.debug(
+        f"Пользователь @{callback.from_user.username} (ID: {callback.from_user.id}) вернулся к выбору сценария"
+    )
+    await callback.answer()
+
+
+@router.message(StateFilter(UserState.waiting_for_serial))
+async def process_serial(message: Message, state: FSMContext, **data):
+    user_id = message.from_user.id
+    username = message.from_user.username or "неизвестно"
+    logger.debug(
+        f"Обработка серийного номера {message.text} от пользователя @{username} (ID: {user_id})"
+    )
+    db_pool = data["db_pool"]
+    serial = message.text.strip()
+    if not validate_serial(serial):
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
+            ]
+        )
+        await message.answer(
+            "Некорректный серийный номер. Введите заново:", reply_markup=keyboard
+        )
+        logger.warning(
+            f"Некорректный серийный номер {serial} от @{username} (ID: {user_id})"
+        )
+        return
+    serial_data, appeals = await get_serial_history(serial)
+    if not serial_data:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_scenario")]
+            ]
+        )
+        await message.answer(
+            f"Серийный номер {serial} не найден.", reply_markup=keyboard
+        )
+        logger.warning(f"Серийный номер {serial} не найден для @{username}")
+        return
+    await state.update_data(serial=serial)
+    data_state = await state.get_data()
+    scenario = data_state.get("scenario")
+    await state.set_state(UserState.menu)
+    try:
+        await message.delete()
+    except TelegramBadRequest as e:
+        logger.error(
+            f"Ошибка удаления сообщения от @{username} (ID: {user_id}): {str(e)}"
+        )
+    if scenario == "manual":
+        await message.answer("Выберите руководство:", reply_markup=get_manuals_menu())
+    else:
+        await message.answer("Добро пожаловать!", reply_markup=get_user_menu())
+    logger.info(
+        f"Серийный номер {serial} сохранён в состоянии для пользователя ID {user_id}"
+    )
+    asyncio.create_task(clear_serial_state(user_id, state))
+
+
+@router.callback_query(F.data == "main_menu")
+async def return_to_main_menu(
+    callback: CallbackQuery, state: FSMContext, bot: Bot, **data
+):
+    user_id = callback.from_user.id
+    username = callback.from_user.username or "неизвестно"
+    logger.debug(
+        f"Обработка возврата в главное меню для пользователя @{username} (ID: {user_id})"
+    )
+    db_pool = data["db_pool"]
+    is_admin = False
+    is_employee = False
+    async with db_pool.acquire() as conn:
+        admin = await conn.fetchrow(
+            "SELECT admin_id FROM admins WHERE admin_id = $1", user_id
+        )
+        logger.debug(f"Результат запроса admins для ID {user_id}: {admin}")
+        if admin or user_id in MAIN_ADMIN_IDS:
+            is_admin = True
+        employee = await conn.fetchrow(
+            "SELECT user_id, serial FROM users WHERE user_id = $1", user_id
+        )
+        logger.debug(f"Результат запроса users для ID {user_id}: {employee}")
+        if employee:
+            is_employee = True
+    try:
+        await callback.message.delete()
+    except TelegramBadRequest as e:
+        logger.error(
+            f"Ошибка удаления сообщения для пользователя @{username} (ID: {user_id}): {str(e)}"
+        )
+    if is_admin:
+        await state.clear()
+        await bot.send_message(
+            chat_id=callback.message.chat.id,
+            text="Добро пожаловать, администратор!",
+            reply_markup=get_admin_menu(user_id),
+        )
+        logger.debug(
+            f"Пользователь @{username} (ID: {user_id}) вернулся в админское меню"
+        )
+    elif is_employee:
+        serial = employee["serial"]
+        await state.update_data(serial=serial)
+        await state.set_state(UserState.menu)
+        await bot.send_message(
+            chat_id=callback.message.chat.id,
+            text="Добро пожаловать!",
+            reply_markup=get_user_menu(),
+        )
+        logger.debug(
+            f"Пользователь @{username} (ID: {user_id}) вернулся в пользовательское меню"
+        )
+    else:
+        data_state = await state.get_data()
+        serial = data_state.get("serial")
+        scenario = data_state.get("scenario")
+        if scenario:
+            await state.set_state(None)
+            await bot.send_message(
+                chat_id=callback.message.chat.id,
+                text="Выберите действие:",
+                reply_markup=_scenario_selection_keyboard(),
+            )
+            logger.debug(
+                f"Пользователь @{username} (ID: {user_id}) возвращён в главное меню выбора"
+            )
+            await callback.answer()
+            return
+        if serial:
+            await state.set_state(UserState.menu)
+            await bot.send_message(
+                chat_id=callback.message.chat.id,
+                text="Добро пожаловать!",
+                reply_markup=get_user_menu(),
+            )
+            logger.debug(
+                f"Пользователь @{username} (ID: {user_id}) вернулся в главное меню"
+            )
+        else:
+            await state.set_state(UserState.waiting_for_auto_delete)
+            try:
+                media = get_start_media()
+                if media:
+                    await bot.send_media_group(
+                        chat_id=callback.message.chat.id, media=media
+                    )
+                await bot.send_message(
+                    chat_id=callback.message.chat.id,
+                    text="⚠️В целях безопасности включите автоматическое удаление сообщений через сутки в настройках Telegram.\n"
+                    "Инструкция в прикреплённых изображениях.⚠️",
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text="Я ВКЛЮЧИЛ АВТОУДАЛЕНИЕ",
+                                    callback_data="confirm_auto_delete",
+                                )
+                            ]
+                        ]
+                    ),
+                )
+                logger.debug(
+                    f"Пользователь @{username} (ID: {user_id}) перенаправлен на запрос автоудаления"
+                )
+            except (TelegramBadRequest, TelegramForbiddenError, FileNotFoundError) as e:
+                logger.error(
+                    f"Ошибка возврата в главное меню для пользователя @{username} (ID: {user_id}): {str(e)}"
+                )
+                await bot.send_message(
+                    chat_id=callback.message.chat.id, text="Ошибка. Попробуйте снова."
+                )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "manuals")
+async def manuals_menu(callback: CallbackQuery):
+    await callback.message.delete()
+    await callback.message.answer(
+        "Выберите руководство:", reply_markup=get_manuals_menu()
+    )
+    await callback.answer()
+
+
+@router.callback_query(
+    manual_category_cb.filter((F.role == "user") & (F.action == "open"))
+)
+async def send_manual(callback: CallbackQuery, callback_data: dict):
+    callback_data = ManualCategoryCallback.model_validate(callback_data)
+    category = callback_data.category
+    files = await get_manual_files(category)
+    await callback.message.delete()
+    if not files:
+        await callback.message.answer(
+            "Файлы отсутствуют.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manuals")]]
+            ),
+        )
+        await callback.answer()
+        return
+
+    back_markup = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manuals")]]
+    )
+    total = len(files)
+    for idx, record in enumerate(files):
+        file_path = public_root() / record["file_path"]
+        reply_markup = back_markup if idx == total - 1 else None
+        file_type = record["file_type"] if "file_type" in record else None
+        try:
+            if file_type == "image":
+                await callback.message.answer_photo(
+                    FSInputFile(file_path), reply_markup=reply_markup
+                )
+            elif file_type == "video":
+                await callback.message.answer_video(
+                    FSInputFile(file_path), reply_markup=reply_markup
+                )
+            else:
+                await callback.message.answer_document(
+                    FSInputFile(file_path), reply_markup=reply_markup
+                )
+        except Exception as exc:  # pragma: no cover - сетевые ошибки Telegram
+            logger.error(
+                "Не удалось отправить файл руководства %s (%s): %s",
+                record["file_name"],
+                file_type,
+                exc,
+            )
+            if reply_markup:
+                await callback.message.answer(
+                    "Не удалось отправить файл.", reply_markup=reply_markup
+                )
+            else:
+                await callback.message.answer("Не удалось отправить файл.")
+
+    await callback.answer()
+
+
+@router.errors()
+async def error_handler(event: ErrorEvent):
+    user = (
+        event.update.message.from_user.username
+        if event.update.message and event.update.message.from_user
+        else "неизвестно"
+    )
+    exc_info = traceback.format_exc()
+    logger.error(
+        f"Ошибка: {event.exception} от пользователя @{user}\nПодробности: {exc_info}"
+    )
+    if event.update.message:
+        await event.update.message.answer(
+            "Произошла ошибка. Попробуйте снова или свяжитесь с поддержкой."
+        )

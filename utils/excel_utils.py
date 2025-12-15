@@ -1,0 +1,203 @@
+import pandas as pd
+import re
+from io import BytesIO
+from datetime import datetime
+from pathlib import Path
+from zipfile import BadZipFile
+
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+def validate_serial(serial):
+    return bool(re.match(r"^[A-Za-z0-9]{6,20}$", str(serial)))
+
+
+async def import_serials(file_io, db_pool):
+    try:
+        if hasattr(file_io, "seek"):
+            file_io.seek(0)
+        df = pd.read_excel(file_io, engine="openpyxl")
+        columns_map = {col.lower(): col for col in df.columns}
+        if "serial" not in columns_map:
+            logger.error("Отсутствует столбец 'Serial' в загруженном файле")
+            return None, "Файл должен содержать столбец 'Serial'.", None
+
+        serial_column = columns_map["serial"]
+        serials = df[serial_column].dropna().astype(str).tolist()
+
+        result = {"added": 0, "skipped": 0, "invalid": []}
+        existing_serials = set()
+
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT serial FROM serials")
+            existing_serials.update(row["serial"] for row in rows)
+
+            valid_serials = []
+            for i, serial in enumerate(serials):
+                if serial in existing_serials:
+                    logger.info(f"Серийный номер {serial} уже существует, пропущен")
+                    result["skipped"] += 1
+                    continue
+                if validate_serial(serial):
+                    valid_serials.append(serial)
+                else:
+                    logger.warning(f"Невалидный серийный номер {serial}")
+                    result["invalid"].append(serial)
+
+                if (i + 1) % 100 == 0 or i == len(serials) - 1:
+                    logger.info(f"Обработано {i + 1} серийных номеров")
+
+            if valid_serials:
+                await conn.executemany(
+                    "INSERT INTO serials (serial, appeal_count) VALUES ($1, 0) ON CONFLICT DO NOTHING",
+                    [(serial,) for serial in valid_serials],
+                )
+                result["added"] = len(valid_serials)
+                for serial in valid_serials:
+                    logger.info(f"Добавлен серийный номер {serial}")
+                    existing_serials.add(serial)
+
+        # Создаём Excel-файл с невалидными номерами, если они есть
+        invalid_file = None
+        if result["invalid"]:
+            invalid_df = pd.DataFrame({"Invalid Serial": result["invalid"]})
+            output = BytesIO()
+            invalid_df.to_excel(output, index=False)
+            output.seek(0)
+            invalid_file = output
+            logger.info(
+                f"Создан Excel-файл с {len(result['invalid'])} невалидными номерами"
+            )
+
+        logger.info(
+            f"Импорт завершён: добавлено {result['added']}, пропущено {result['skipped']}, невалидных {len(result['invalid'])}"
+        )
+        return result, None, invalid_file
+    except BadZipFile:
+        logger.error("Повреждённый или неподдерживаемый файл Excel")
+        return None, "Файл повреждён или имеет неверный формат XLSX.", None
+    except Exception as e:
+        logger.error(f"Ошибка при импорте серийных номеров: {str(e)}")
+        return None, f"Ошибка при обработке файла: {str(e)}", None
+
+
+async def export_serials(db_pool):
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT s.serial, s.appeal_count, s.return_status, a.username, a.created_time, a.taken_time, a.closed_time, a.new_serial
+                FROM serials s
+                LEFT JOIN appeals a ON s.serial = a.serial
+            """)
+
+        data = []
+        for row in rows:
+            username = row["username"] or "Не назначен"
+            created_time = row["created_time"]
+            if created_time:
+                try:
+                    created_time = datetime.strptime(
+                        created_time, "%Y-%m-%dT%H:%M"
+                    ).strftime("%Y-%m-%d %H:%M")
+                except ValueError:
+                    created_time = created_time
+            else:
+                created_time = "Нет обращений"
+            taken_time = row["taken_time"]
+            if taken_time:
+                try:
+                    taken_time = datetime.strptime(
+                        taken_time, "%Y-%m-%dT%H:%M"
+                    ).strftime("%Y-%m-%d %H:%M")
+                except ValueError:
+                    taken_time = taken_time
+            else:
+                taken_time = "Нет обращений"
+            closed_time = row["closed_time"]
+            if closed_time:
+                try:
+                    closed_time = datetime.strptime(
+                        closed_time, "%Y-%m-%dT%H:%M"
+                    ).strftime("%Y-%m-%d %H:%M")
+                except ValueError:
+                    closed_time = closed_time
+            else:
+                closed_time = "Нет обращений"
+            new_serial = row["new_serial"] or "Не указан"
+            data.append(
+                {
+                    "Serial": row["serial"],
+                    "Appeal Count": row["appeal_count"],
+                    "Return Status": row["return_status"] or "Не указан",
+                    "Admin Username": username,
+                    "Created Time": created_time,
+                    "Taken Time": taken_time,
+                    "Closed Time": closed_time,
+                    "New Serial": new_serial,
+                }
+            )
+            logger.info(f"Экспортирован серийный номер {row['serial']}")
+
+        if not data:
+            logger.warning("Нет данных для экспорта")
+            return None
+
+        df = pd.DataFrame(data)
+        output = BytesIO()
+        df.to_excel(output, index=False)
+        output.seek(0)
+        logger.info("Файл экспорта успешно создан")
+        return output
+    except Exception as e:
+        logger.error(f"Ошибка при экспорте серийных номеров: {str(e)}")
+        return None
+
+
+async def export_visits_to_excel(visits: list, file_path: Path) -> Path:
+    """Экспортирует визиты сотрудников в Excel-файл по переданному пути."""
+
+    try:
+        data = []
+        for visit in visits:
+            created_at = visit.get("created_at")
+            finished_at = visit.get("finished_at")
+            visit_time = finished_at or created_at
+            visit_time_fmt = (
+                visit_time.strftime("%d.%m.%Y %H:%M") if visit_time else ""
+            )
+
+            admin_parts = [str(visit.get("admin_tg_id", ""))]
+            username = visit.get("admin_username")
+            if username:
+                admin_parts.append(f"@{username}")
+            full_name = " ".join(
+                filter(None, [visit.get("admin_first_name"), visit.get("admin_last_name")])
+            ).strip()
+            if full_name:
+                admin_parts.append(full_name)
+            admin_display = " | ".join(filter(None, admin_parts))
+
+            media_link = visit.get("media_path") or ""
+            data.append(
+                {
+                    "Дата/время визита": visit_time_fmt,
+                    "Администратор": admin_display,
+                    "Подразделение": visit.get("subdivision", ""),
+                    "Позывные": visit.get("callsigns", ""),
+                    "Задачи": visit.get("tasks", ""),
+                    "Тип медиа": visit.get("media_type", ""),
+                    "Ссылка на медиа": media_link,
+                }
+            )
+
+        df = pd.DataFrame(data)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_excel(file_path, index=False)
+
+        logger.info("Файл экспорта визитов успешно создан: %s", file_path)
+        return file_path
+    except Exception as e:
+        logger.error("Ошибка при экспорте визитов: %s", e)
+        return None
