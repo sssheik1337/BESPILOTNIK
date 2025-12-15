@@ -262,7 +262,7 @@ async def process_specialty(message: Message, state: FSMContext, bot: Bot):
     if await _maybe_return_to_review(message, state):
         return
     await message.answer(
-        "Нажмите кнопку, чтобы отправить контактные данные Telegram (ID, username и телефон при наличии).",
+        "Нажмите кнопку, чтобы отправить контактные данные Telegram (телефон, username и ID).",
         reply_markup=ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="📱 Отправить контакт", request_contact=True)],
@@ -289,7 +289,13 @@ async def process_contact(message: Message, state: FSMContext, bot: Bot):
     phone = ""
     if message.contact and message.contact.phone_number:
         phone = message.contact.phone_number
-    contact_value = f"{message.from_user.id},{message.from_user.username or ''},{phone}"
+    phone_value = phone or ""
+    if phone_value and not phone_value.startswith("+"):
+        phone_value = f"+{phone_value}"
+    username_value = message.from_user.username or ""
+    if username_value and not username_value.startswith("@"):
+        username_value = f"@{username_value}"
+    contact_value = f"{phone_value},{username_value},{message.from_user.id}"
     await state.update_data(contact=contact_value)
     if await _maybe_return_to_review(message, state):
         return
@@ -485,7 +491,7 @@ async def edit_exam_field(callback: CallbackQuery, state: FSMContext):
         "subdivision": "Введите подразделение:",
         "callsign": "Введите позывной:",
         "specialty": "Введите направление (например, \"Север\", \"Юг\", \"Днепр\", \"Покровск\"):",
-        "contact": "Нажмите кнопку, чтобы отправить контактные данные Telegram (ID, username и телефон при наличии).",
+        "contact": "Нажмите кнопку, чтобы отправить контактные данные Telegram (телефон, username и ID).",
     }
     target_state = {
         "fio": UserExam.fio,

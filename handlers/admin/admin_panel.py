@@ -2,6 +2,7 @@ import asyncio
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from openpyxl.utils import get_column_letter
 
 from aiogram import Router, F, Bot
 from typing import List, Optional
@@ -3866,6 +3867,36 @@ async def export_exams_handler(callback: CallbackQuery, **data):
         except ValueError:
             return value
 
+    def format_contact_value(contact_value: str) -> str:
+        """Форматирует контакт так, чтобы телефон был с "+", а username с "@"."""
+
+        if contact_value is None:
+            return "Отсутствует"
+
+        parts = [part.strip() for part in contact_value.split(",")]
+        phone = parts[0] if len(parts) >= 1 else ""
+        username = parts[1] if len(parts) >= 2 else ""
+        telegram_id = parts[2] if len(parts) >= 3 else ""
+
+        for part in reversed(parts):
+            cleaned_part = part.strip()
+            numeric_part = cleaned_part[1:] if cleaned_part.startswith("+") else cleaned_part
+            if numeric_part.isdigit():
+                telegram_id = numeric_part
+                break
+
+        if phone and phone.lstrip("+").isdigit() and telegram_id == phone.lstrip("+"):
+            phone = parts[2] if len(parts) >= 3 else ""
+
+        if phone and not phone.startswith("+"):
+            phone = f"+{phone}"
+
+        if username and not username.startswith("@"):
+            username = f"@{username}"
+
+        contact_parts = [part for part in [phone, username, telegram_id] if part]
+        return ", ".join(contact_parts) if contact_parts else "Отсутствует"
+
     for record in records:
         record_dict = dict(record)
         photo_links = json.loads(record_dict.get("photo_links") or "[]")
@@ -3877,7 +3908,7 @@ async def export_exams_handler(callback: CallbackQuery, **data):
                 "В/Ч": record_dict.get("military_unit"),
                 "Позывной": record_dict.get("callsign"),
                 "Направление": record_dict.get("specialty"),
-                "Контакт": record_dict.get("contact"),
+                "Контакт": format_contact_value(record_dict.get("contact")),
                 "УТЦ": record_dict.get("center_name") or "Отсутствует",
                 "Видео": record_dict.get("video_link") or "Отсутствует",
                 "Фото": ", ".join(photo_links) or "Отсутствует",
@@ -3887,7 +3918,17 @@ async def export_exams_handler(callback: CallbackQuery, **data):
         )
     df = pd.DataFrame(data)
     output = BytesIO()
-    df.to_excel(output, index=False)
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+        worksheet = writer.sheets[writer.sheet_names[0]]
+        for column_cells in worksheet.columns:
+            max_length = max(
+                len(str(cell.value)) if cell.value is not None else 0
+                for cell in column_cells
+            )
+            column_letter = get_column_letter(column_cells[0].column)
+            worksheet.column_dimensions[column_letter].width = max_length + 2
+
     output.seek(0)
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
